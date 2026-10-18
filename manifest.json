@@ -21,6 +21,6 @@
     "management_url": "/options/options.html",
     "reuse_uploads": false
   },
-  "permissions": ["storage", "notifications"],
-  "optional_permissions": ["https://*/*", "http://*/*"]
+  "permissions": ["storage", "notifications", "clipboardWrite"],
+  "optional_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
 }

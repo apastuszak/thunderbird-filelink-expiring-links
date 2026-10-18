@@ -9,6 +9,12 @@ Thunderbird Filelink provider for Nextcloud with expiring links, optional genera
 3. Enter your Nextcloud URL and click Connect; finish the login in your browser.
 4. Attach a file in the composer and choose to link it with this provider.
 
+## Security notes
+
+- The server must be reachable over HTTPS with a valid certificate (plain HTTP only for `localhost`).
+- Only a Nextcloud app password is stored, in the Thunderbird profile (`browser.storage.local`), unencrypted. Thunderbird gives add-ons no encrypted storage. Disconnecting or removing the account revokes the app password on the server.
+- Generated link passwords are copied to the clipboard. Send them to the recipient separately, not in the same email.
+
 ## Status
 
 Early scaffold. One-time downloads depend on Nextcloud's Download Limit app and the endpoint used is not yet verified. See `CLAUDE.md` for the full list of open items.
