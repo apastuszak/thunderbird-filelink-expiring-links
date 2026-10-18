@@ -60,7 +60,7 @@ Alternatively: Thunderbird > Tools > Developer Tools > Debug Add-ons > Load Temp
 6. **Large files.** Single `PUT` of a `File` blob. Add Nextcloud chunked upload (`/remote.php/dav/uploads/<user>/`) with progress and resume for big attachments; mind server `upload_max_filesize` and proxy limits.
 7. **`management_url` and `accountId`.** The options page assumes Thunderbird passes `?accountId=`. Confirm in the Thunderbird version you test; if not, derive the account from `browser.cloudFile.getAllAccounts()`.
 8. **Self-signed certificates / plain HTTP** will fail in `fetch`. Decide whether to support them or document that valid TLS is required.
-9. **Icons and localisation** are missing (`icons` in the manifest, `_locales/`). Add before publishing. The add-on ID (`thunderbird-filelink-expiring-links@apastuszak`) is final: changing it after the first release breaks updates.
+9. **Localisation** is missing (`_locales/`); add before publishing. The icon (`icons/nextcloud.svg`) is Nextcloud's own app icon from `nextcloud/server` (`core/img/favicon.svg`); the logo is a Nextcloud GmbH trademark, so check their brand guidelines before listing on addons.thunderbird.net. The add-on ID (`thunderbird-filelink-expiring-links@apastuszak`) is final: changing it after the first release breaks updates.
 10. **Tests.** Add Node tests for `normalizeBaseUrl`, `sharePolicy` and the OCS error handling with mocked `fetch`.
 
 ## Rules for changes

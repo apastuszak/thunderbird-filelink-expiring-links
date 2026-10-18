@@ -6,6 +6,13 @@
   "version": "0.1.0",
   "author": "Andy Pastuszak",
   "homepage_url": "https://github.com/apastuszak/thunderbird-filelink-expiring-links",
+  "icons": {
+    "16": "icons/nextcloud.svg",
+    "32": "icons/nextcloud.svg",
+    "48": "icons/nextcloud.svg",
+    "64": "icons/nextcloud.svg",
+    "128": "icons/nextcloud.svg"
+  },
   "browser_specific_settings": {
     "gecko": {
       "id": "thunderbird-filelink-expiring-links@apastuszak",
