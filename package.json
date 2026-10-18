@@ -2,6 +2,11 @@
   "name": "nextcloud-expiring-links",
   "version": "0.1.0",
   "private": true,
+  "author": "Andy Pastuszak",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apastuszak/nextcloud-expiring-links.git"
+  },
   "type": "module",
   "scripts": {
     "lint": "web-ext lint --source-dir .",

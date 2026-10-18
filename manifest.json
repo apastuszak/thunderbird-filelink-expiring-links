@@ -4,9 +4,11 @@
   "short_name": "NC Links",
   "description": "Filelink provider for Nextcloud with expiring and one-time download links.",
   "version": "0.1.0",
+  "author": "Andy Pastuszak",
+  "homepage_url": "https://github.com/apastuszak/nextcloud-expiring-links",
   "browser_specific_settings": {
     "gecko": {
-      "id": "nextcloud-expiring-links@example.invalid",
+      "id": "nextcloud-expiring-links@apastuszak",
       "strict_min_version": "128.0"
     }
   },
