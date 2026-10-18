@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "Nextcloud Expiring Links",
+  "short_name": "NC Links",
+  "description": "Filelink provider for Nextcloud with expiring and one-time download links.",
+  "version": "0.1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nextcloud-expiring-links@example.invalid",
+      "strict_min_version": "128.0"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "cloud_file": {
+    "name": "Nextcloud (expiring links)",
+    "management_url": "/options/options.html",
+    "reuse_uploads": false
+  },
+  "permissions": ["storage", "notifications"],
+  "optional_permissions": ["https://*/*", "http://*/*"]
+}

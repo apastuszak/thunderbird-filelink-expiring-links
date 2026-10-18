@@ -1,0 +1,10 @@
+{
+  "name": "nextcloud-expiring-links",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "web-ext lint --source-dir .",
+    "build": "web-ext build --source-dir . --artifacts-dir dist --ignore-files CLAUDE.md README.md package.json 'dist/**' 'node_modules/**'"
+  }
+}

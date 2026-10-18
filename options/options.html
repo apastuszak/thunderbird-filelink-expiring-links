@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nextcloud Expiring Links</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <section id="connect">
+    <h2>Nextcloud server</h2>
+    <label for="url">Nextcloud URL</label>
+    <div class="row">
+      <input id="url" type="url" placeholder="https://cloud.example.com" autocomplete="off">
+      <button id="connect-btn" type="button">Connect</button>
+    </div>
+    <p id="status" role="status"></p>
+    <p id="connected" hidden>
+      Connected as <strong id="who"></strong>
+      <button id="disconnect-btn" type="button" class="secondary">Disconnect</button>
+    </p>
+  </section>
+
+  <section id="settings">
+    <h2>Link defaults</h2>
+    <label for="folder">Upload folder</label>
+    <input id="folder" type="text">
+
+    <label for="expiry">Expire after (days, 0 = server default)</label>
+    <input id="expiry" type="number" min="0" max="3650">
+    <p class="hint" id="policy"></p>
+
+    <label class="check"><input id="password" type="checkbox"> Protect with a generated password</label>
+    <label class="check"><input id="onetime" type="checkbox"> One-time download (needs the Download Limit app)</label>
+
+    <button id="save-btn" type="button">Save</button>
+    <span id="saved" role="status"></span>
+  </section>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>
