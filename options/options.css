@@ -9,4 +9,3 @@ button { padding: 6px 14px; cursor: pointer; }
 button.secondary { margin-left: .75em; }
 .hint, #status { color: GrayText; min-height: 1.2em; margin: .4em 0; }
 #status.error { color: #c0392b; }
-#saved { margin-left: .75em; color: GrayText; }

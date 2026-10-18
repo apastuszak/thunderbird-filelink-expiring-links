@@ -26,11 +26,19 @@ async function loadAccount() {
   return { ...DEFAULTS, ...(accounts[accountId] || {}) };
 }
 
-async function saveAccount(patch) {
-  const { accounts = {} } = await browser.storage.local.get("accounts");
-  accounts[accountId] = { ...(accounts[accountId] || {}), ...patch };
-  await browser.storage.local.set({ accounts });
-  return accounts;
+// Saves run one at a time: a settings save overlapping Connect could otherwise write back
+// the account without its new app password.
+let saving = Promise.resolve();
+
+function saveAccount(patch) {
+  const run = saving.then(async () => {
+    const { accounts = {} } = await browser.storage.local.get("accounts");
+    accounts[accountId] = { ...(accounts[accountId] || {}), ...patch };
+    await browser.storage.local.set({ accounts });
+    return accounts;
+  });
+  saving = run.catch(() => {});
+  return run;
 }
 
 function policyText(policy) {
@@ -117,19 +125,40 @@ $("disconnect-btn").addEventListener("click", async () => {
   await render();
 });
 
-$("save-btn").addEventListener("click", async () => {
+// Settings apply as soon as they change, like Thunderbird's own preferences. With a Save button,
+// ticking a box and leaving the page silently dropped the change.
+let typingTimer;
+let savedTimer;
+
+async function saveSettings({ tidy = false } = {}) {
+  clearTimeout(typingTimer);
   const a = await loadAccount();
   const requested = Math.max(0, parseInt($("expiry").value, 10) || 0);
   const expiryDays = clampExpiryDays(requested, a.policy);
+  const folder = $("folder").value.trim() || DEFAULTS.folder;
   await saveAccount({
-    folder: $("folder").value.trim() || DEFAULTS.folder,
+    folder,
     expiryDays,
     generatePassword: $("password").checked || !!a.policy?.passwordEnforced,
     oneTime: $("onetime").checked,
   });
-  $("expiry").value = expiryDays;
+  if (tidy) {
+    $("folder").value = folder;
+    $("expiry").value = expiryDays;
+  }
   $("saved").textContent = expiryDays < requested ? `Saved. Expiry capped at ${expiryDays} days by the server.` : "Saved.";
-  setTimeout(() => ($("saved").textContent = ""), 4000);
-});
+  clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => ($("saved").textContent = ""), 4000);
+}
+
+for (const id of ["password", "onetime"]) $(id).addEventListener("change", () => saveSettings());
+for (const id of ["folder", "expiry"]) {
+  // Also save while typing, so closing the settings tab without leaving the field keeps the value.
+  $(id).addEventListener("input", () => {
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(saveSettings, 500);
+  });
+  $(id).addEventListener("change", () => saveSettings({ tidy: true }));
+}
 
 render();
