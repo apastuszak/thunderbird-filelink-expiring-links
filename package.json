@@ -1,6 +1,6 @@
 {
   "name": "thunderbird-filelink-expiring-links",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "author": "Andy Pastuszak",
   "repository": {
@@ -9,8 +9,8 @@
   },
   "type": "module",
   "scripts": {
-    "lint": "web-ext lint --source-dir .",
+    "lint": "npx --yes web-ext lint --source-dir . --ignore-files 'node_modules/**' 'test/**' '*.xpi'",
     "test": "node --test",
-    "build": "web-ext build --source-dir . --artifacts-dir dist --ignore-files CLAUDE.md README.md package.json 'dist/**' 'node_modules/**' 'test/**'"
+    "build": "npx --yes web-ext build --source-dir . --artifacts-dir dist --ignore-files CLAUDE.md README.md package.json 'dist/**' 'node_modules/**' 'test' 'test/**'"
   }
 }
