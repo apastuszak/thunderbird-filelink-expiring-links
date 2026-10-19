@@ -3,6 +3,7 @@
   "version": "0.1.11",
   "private": true,
   "author": "Andy Pastuszak",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/apastuszak/thunderbird-filelink-expiring-links.git"
