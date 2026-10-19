@@ -1,7 +1,6 @@
 // Settings page, loaded by Thunderbird inside the account settings with ?accountId=<id>.
 import {
   checkServer,
-  chunkSizeFromCapabilities,
   clampExpiryDays,
   getCapabilities,
   getCurrentUser,
@@ -9,7 +8,7 @@ import {
   originPattern,
   pollLoginFlow,
   revokeAppPassword,
-  sharePolicy,
+  serverInfo,
   startLoginFlow,
 } from "../lib/nextcloud.js";
 
@@ -57,22 +56,43 @@ function policyText(policy) {
   return text.trim();
 }
 
-async function render() {
-  const a = await loadAccount();
+/** Fields the background can also change (remembered password choice, refreshed server settings). */
+function renderChoices(a) {
   const passwordEnforced = !!a.policy?.passwordEnforced;
-  $("url").value = a.baseUrl || "";
-  $("folder").value = a.folder;
-  $("expiry").value = a.expiryDays;
   $("password").checked = a.generatePassword || passwordEnforced;
   $("password").disabled = passwordEnforced;
   $("onetime").checked = a.oneTime;
+  $("onetime").disabled = a.downloadLimit === false && !a.oneTime;
+  $("onetime-hint").textContent =
+    a.downloadLimit === false ? "Not available: the Download Limit app is not installed on this server." : "";
   $("delivery").value = a.passwordDelivery;
+  $("policy").textContent = policyText(a.policy);
+}
+
+async function render() {
+  const a = await loadAccount();
+  $("url").value = a.baseUrl || "";
+  $("folder").value = a.folder;
+  $("expiry").value = a.expiryDays;
+  renderChoices(a);
   const connected = !!a.appPassword;
   $("connected").hidden = !connected;
   $("who").textContent = connected ? `${a.displayName || a.userId} @ ${a.baseUrl}` : "";
   $("connect-btn").hidden = connected;
   $("url").disabled = connected;
-  $("policy").textContent = policyText(a.policy);
+}
+
+// Without this, a later save from this page would write back a stale value over the background's change.
+browser.storage.onChanged.addListener(async (changes, area) => {
+  if (area === "local" && changes.accounts) renderChoices(await loadAccount());
+});
+
+/** Gives up the host permission unless a connected account still needs it (the pattern covers all ports). */
+async function releaseOriginIfUnused(baseUrl) {
+  const { accounts = {} } = await browser.storage.local.get("accounts");
+  const pattern = originPattern(baseUrl);
+  const inUse = Object.values(accounts).some((o) => o.appPassword && o.baseUrl && originPattern(o.baseUrl) === pattern);
+  if (!inUse) await browser.permissions.remove({ origins: [originPattern(baseUrl)] }).catch(() => {});
 }
 
 $("connect-btn").addEventListener("click", async () => {
@@ -99,12 +119,10 @@ $("connect-btn").addEventListener("click", async () => {
 
     account = { baseUrl, loginName: creds.loginName, appPassword: creds.appPassword };
     const user = await getCurrentUser(account);
-    const capabilities = await getCapabilities(account);
-    const policy = sharePolicy(capabilities);
-    const chunkSize = chunkSizeFromCapabilities(capabilities);
+    const info = serverInfo(await getCapabilities(account));
 
-    const patch = { ...account, userId: user.id, displayName: user.displayName, policy, chunkSize };
-    if (policy.passwordEnforced) patch.generatePassword = true;
+    const patch = { ...account, userId: user.id, displayName: user.displayName, ...info };
+    if (info.policy.passwordEnforced) patch.generatePassword = true;
     await saveAccount(patch);
     account = null; // stored now; no longer ours to revoke
     if (accountId) await browser.cloudFile.updateAccount(accountId, { configured: true });
@@ -114,6 +132,7 @@ $("connect-btn").addEventListener("click", async () => {
   } catch (e) {
     // Setup failed after login: do not leave an app password nobody stores on the server.
     if (account) await revokeAppPassword(account).catch(() => {});
+    await releaseOriginIfUnused(baseUrl);
     setStatus(e.message, true);
   } finally {
     $("connect-btn").disabled = false;
@@ -124,12 +143,8 @@ $("disconnect-btn").addEventListener("click", async () => {
   const a = await loadAccount();
   // Ignore failures; the user can still revoke it in Nextcloud's security settings.
   await revokeAppPassword(a).catch(() => {});
-  const accounts = await saveAccount({ appPassword: null, loginName: null, userId: null, displayName: null });
-  if (a.baseUrl) {
-    const origin = new URL(a.baseUrl).origin;
-    const inUse = Object.values(accounts).some((o) => o.appPassword && o.baseUrl && new URL(o.baseUrl).origin === origin);
-    if (!inUse) await browser.permissions.remove({ origins: [originPattern(a.baseUrl)] }).catch(() => {});
-  }
+  await saveAccount({ appPassword: null, loginName: null, userId: null, displayName: null });
+  if (a.baseUrl) await releaseOriginIfUnused(a.baseUrl);
   if (accountId) await browser.cloudFile.updateAccount(accountId, { configured: false });
   setStatus("Disconnected.");
   await render();
