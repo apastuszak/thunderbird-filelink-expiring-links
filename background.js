@@ -40,7 +40,11 @@ const drafts = new Map(); // tabId -> { tabId, accountId, password, links, deliv
 // ---- storage helpers -------------------------------------------------------
 // One key per upload: parallel uploads would lose records if they shared one object.
 
-const uploadKey = (accountId, fileId) => `upload:${accountId}:${fileId}`;
+// Thunderbird numbers both fileIds and tab IDs from 1 again in every session (parent/ext-cloudFile.js,
+// parent/ext-mail.js), while records of unsent drafts outlive the session. So keys and the
+// "sent from this window" match include an ID for this run of the add-on.
+const SESSION = randomId();
+const uploadKey = (accountId, fileId) => `upload:${accountId}:${SESSION}:${fileId}`;
 const UPLOAD_PREFIX = "upload:";
 const PENDING_PREFIX = "pendingDelete:";
 // Records hold the link's password until the message is sent (then they are deleted), so drafts
@@ -197,6 +201,7 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
         shareId: share.id,
         davPath,
         accountId: account.id,
+        session: SESSION,
         tabId: tab?.id,
         createdAt: Date.now(),
         url: share.url,
@@ -382,7 +387,8 @@ browser.compose.onAfterSend.addListener(async (tab, sendInfo) => {
   drafts.delete(tab.id);
   const recovered = new Set([...(draft?.links.values() ?? [])].map((link) => link.key));
   const all = await browser.storage.local.get(null);
-  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && (all[k].tabId === tab.id || recovered.has(k)));
+  const ownWindow = (r) => r.session === SESSION && r.tabId === tab.id;
+  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && (ownWindow(all[k]) || recovered.has(k)));
   await browser.storage.local.remove(sent);
   if (draft?.delivery !== "separate" || !draft.recipients || !draft.links.size) return;
   // Opened as a draft, not sent: the user checks the recipients and sends it themselves.
