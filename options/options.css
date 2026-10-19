@@ -3,10 +3,9 @@ body { margin: 0; padding: 16px; max-width: 520px; }
 h2 { font-size: 1.1em; margin: 1.2em 0 .6em; }
 label { display: block; margin: .8em 0 .25em; font-weight: 600; }
 label.check { font-weight: normal; display: flex; gap: .5em; align-items: center; }
-input[type="url"], input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; padding: 6px 8px; }
+input[type="url"], input[type="text"], input[type="number"], select { width: 100%; box-sizing: border-box; padding: 6px 8px; }
 .row { display: flex; gap: 8px; }
 button { padding: 6px 14px; cursor: pointer; }
 button.secondary { margin-left: .75em; }
 .hint, #status { color: GrayText; min-height: 1.2em; margin: .4em 0; }
 #status.error { color: #c0392b; }
-#saved { margin-left: .75em; color: GrayText; }

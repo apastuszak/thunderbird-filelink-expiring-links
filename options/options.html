@@ -31,10 +31,16 @@
     <p class="hint" id="policy"></p>
 
     <label class="check"><input id="password" type="checkbox"> Protect with a generated password</label>
+    <label for="delivery">Send the password</label>
+    <select id="delivery">
+      <option value="ask">Ask each time</option>
+      <option value="separate">In a separate email</option>
+      <option value="same">In the same email, below the link</option>
+      <option value="self">I'll send it myself (copy to clipboard)</option>
+    </select>
     <label class="check"><input id="onetime" type="checkbox"> One-time download (needs the Download Limit app)</label>
 
-    <button id="save-btn" type="button">Save</button>
-    <span id="saved" role="status"></span>
+    <p class="hint" id="saved" role="status"></p>
   </section>
 
   <script type="module" src="options.js"></script>
