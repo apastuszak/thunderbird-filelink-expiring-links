@@ -5,11 +5,13 @@ import {
   deleteFile,
   deleteShare,
   ensureFolder,
+  getCapabilities,
   localDateFromNow,
   originPattern,
   parseShareDate,
   randomPassword,
   revokeAppPassword,
+  serverInfo,
   setDownloadLimit,
   uploadFile,
 } from "./lib/nextcloud.js";
@@ -32,7 +34,10 @@ const drafts = new Map(); // tabId -> { tabId, accountId, password, links, deliv
 // One key per upload: parallel uploads would lose records if they shared one object.
 
 const uploadKey = (accountId, fileId) => `upload:${accountId}:${fileId}`;
+const UPLOAD_PREFIX = "upload:";
 const PENDING_PREFIX = "pendingDelete:";
+// Records are only needed while a message is being written; drop leftovers (drafts kept for months).
+const UPLOAD_RECORD_MAX_AGE = 90 * 24 * 60 * 60 * 1000;
 
 async function getAccount(accountId) {
   const { accounts = {} } = await browser.storage.local.get("accounts");
@@ -83,33 +88,46 @@ const DELIVERY_NOTES = {
 };
 
 /**
- * Copies the password, then asks once per message how to deliver it (or applies the saved choice).
- * The password is only shown in a notification if neither the clipboard nor a compose tab is available.
+ * For when the user sends the password themselves: copy it, and only if that fails show it in a
+ * notification (which may linger in the notification centre).
  */
-async function announcePassword(fileName, password, draft, preference) {
+async function handOverPassword(fileName, password) {
   const copied = await navigator.clipboard.writeText(password).then(
     () => true,
     () => false,
   );
-  if (!draft) {
-    if (copied) notify("Link password copied", `${fileName}: the password is on your clipboard. ${DELIVERY_NOTES.self}`);
-    else notify("Link password", `${fileName}: ${password}\n${DELIVERY_NOTES.self}`);
-    return;
-  }
+  if (copied) notify("Link password copied", `${fileName}: the password is on your clipboard. ${DELIVERY_NOTES.self}`);
+  else notify("Link password", `${fileName}: ${password}\n${DELIVERY_NOTES.self}`);
+}
+
+/**
+ * Asks once per message how to deliver the password, or applies the saved choice. The clipboard is
+ * only used when the user sends the password themselves: elsewhere it would linger, and on a Mac
+ * Universal Clipboard would copy it to the user's other devices.
+ */
+async function announcePassword(fileName, password, draft, preference) {
+  if (!draft) return handOverPassword(fileName, password); // no compose tab to work with
   if (draft.delivery) return; // already decided for this message
   if (preference !== "ask" && DELIVERY_NOTES[preference]) {
     draft.delivery = preference;
-    if (copied) notify("Link password copied", `${fileName}: ${DELIVERY_NOTES[preference]}`);
-    else notify("Link password", `${fileName}: ${password}\n${DELIVERY_NOTES[preference]}`);
+    if (preference === "self") return handOverPassword(fileName, password);
+    notify("Link password", `${fileName}: ${DELIVERY_NOTES[preference]}`);
     return;
   }
-  draft.delivery = "self"; // until the user picks something else
-  await browser.windows.create({
-    url: `/password/password.html?tabId=${draft.tabId}`,
-    type: "popup",
-    width: 480,
-    height: 460,
-  });
+  // Matches the option the window shows selected, so closing it does what it showed.
+  draft.delivery = "separate";
+  try {
+    await browser.windows.create({
+      url: `/password/password.html?tabId=${draft.tabId}`,
+      type: "popup",
+      width: 480,
+      height: 480,
+    });
+  } catch (e) {
+    console.warn("Could not open the password window:", e.message);
+    draft.delivery = "self";
+    await handOverPassword(fileName, password);
+  }
 }
 
 // ---- cloudFile listeners ---------------------------------------------------
@@ -123,6 +141,9 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
   let share;
   try {
     settings = await getAccount(account.id);
+    if (settings.oneTime && settings.downloadLimit === false) {
+      throw new Error("One-time download needs the Download Limit app on the Nextcloud server. Turn the option off in this account's settings, or ask the admin to install the app.");
+    }
     // One random sub-folder per upload avoids name collisions without renaming the file.
     folder = `${settings.folder.replace(/^\/+|\/+$/g, "")}/${randomId()}`;
     const davPath = `${folder}/${fileInfo.name}`;
@@ -151,7 +172,9 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
       }
     }
 
-    await browser.storage.local.set({ [uploadKey(account.id, fileInfo.id)]: { shareId: share.id, davPath } });
+    await browser.storage.local.set({
+      [uploadKey(account.id, fileInfo.id)]: { shareId: share.id, davPath, tabId: tab?.id, createdAt: Date.now() },
+    });
 
     if (password) {
       draft?.links.set(fileInfo.id, share.url);
@@ -247,17 +270,33 @@ browser.compose.onBeforeSend.addListener(async (tab, details) => {
     return {};
   }
   if (draft.delivery !== "same") return {};
-  const urls = [...draft.links.values()];
-  if (details.isPlainText) {
-    return { details: { plainTextBody: addPasswordToPlainText(details.plainTextBody, urls, draft.password) } };
+  // Thunderbird waits for this listener and never completes the send if it throws, leaving the
+  // compose window locked. So never throw: cancel instead, and fall back to a separate email.
+  try {
+    const urls = [...draft.links.values()];
+    if (details.isPlainText) {
+      return { details: { plainTextBody: addPasswordToPlainText(details.plainTextBody, urls, draft.password) } };
+    }
+    const doc = new DOMParser().parseFromString(details.body, "text/html");
+    addPasswordToHtml(doc, urls, draft.password);
+    return { details: { body: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}` } };
+  } catch (e) {
+    console.warn("Could not add the link password to the message:", e.message);
+    draft.delivery = "separate";
+    notify(
+      "Message not sent",
+      "The link password could not be added to this message. Click Send again to send it without the password; a separate email with the password will then open.",
+    );
+    return { cancel: true };
   }
-  const doc = new DOMParser().parseFromString(details.body, "text/html");
-  addPasswordToHtml(doc, urls, draft.password);
-  return { details: { body: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}` } };
 });
 
 browser.compose.onAfterSend.addListener(async (tab, sendInfo) => {
   if (sendInfo.error) return; // keep the draft state; the user may try sending again
+  // Sent attachments are never deleted through cloudFile, so their cleanup records are done with.
+  const all = await browser.storage.local.get(null);
+  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && all[k].tabId === tab.id);
+  await browser.storage.local.remove(sent);
   const draft = drafts.get(tab.id);
   drafts.delete(tab.id);
   if (draft?.delivery !== "separate" || !draft.recipients || !draft.links.size) return;
@@ -291,5 +330,34 @@ async function restoreConfiguredState() {
   }
 }
 
+/** Drops upload records of messages sent before this version, or kept as drafts for months. */
+async function pruneUploadRecords() {
+  const all = await browser.storage.local.get(null);
+  const cutoff = Date.now() - UPLOAD_RECORD_MAX_AGE;
+  const stale = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && !(all[k].createdAt > cutoff));
+  await browser.storage.local.remove(stale);
+}
+
+/** Re-reads sharing policy, chunk size and Download Limit availability; the admin may have changed them. */
+async function refreshServerInfo() {
+  const { accounts = {} } = await browser.storage.local.get("accounts");
+  for (const [id, account] of Object.entries(accounts)) {
+    if (!account.appPassword) continue;
+    try {
+      const info = serverInfo(await getCapabilities(account));
+      // Re-read just before writing, to keep changes made meanwhile (e.g. in the options page).
+      const { accounts: latest = {} } = await browser.storage.local.get("accounts");
+      if (!latest[id]?.appPassword) continue;
+      latest[id] = { ...latest[id], ...info };
+      if (info.policy.passwordEnforced) latest[id].generatePassword = true;
+      await browser.storage.local.set({ accounts: latest });
+    } catch (e) {
+      console.warn("Could not refresh server settings:", e.message); // offline: keep the stored ones
+    }
+  }
+}
+
 restoreConfiguredState();
 retryPendingDeletes();
+pruneUploadRecords();
+refreshServerInfo();
