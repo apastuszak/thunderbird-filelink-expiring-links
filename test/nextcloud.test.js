@@ -8,6 +8,7 @@ import {
   checkShareUrl,
   MAX_CHUNK_SIZE,
   originPattern,
+  pollLoginFlow,
   serverInfo,
   localDateFromNow,
   normalizeBaseUrl,
@@ -133,6 +134,13 @@ describe("randomPassword", () => {
 });
 
 describe("OCS error handling", () => {
+  it("marks only Nextcloud's own refusals with ocsStatus, not bare proxy statuses", async () => {
+    mockFetch(404, { ocs: { meta: { statuscode: 404, message: "Cannot set expiration date" }, data: [] } });
+    await assert.rejects(createPublicShare(account, { path: "/a" }), (e) => e.ocsStatus === 404);
+    mockFetch(502, "<html>Bad Gateway</html>");
+    await assert.rejects(createPublicShare(account, { path: "/a" }), (e) => e.ocsStatus === undefined && /HTTP 502/.test(e.message));
+  });
+
   it("returns share fields on success", async () => {
     const calls = mockFetch(200, {
       ocs: { meta: { statuscode: 200 }, data: { id: "42", token: "abc", url: "https://x/s/abc", expiration: "2026-10-25 00:00:00" } },
@@ -430,5 +438,64 @@ describe("server error text", () => {
     await assert.rejects(uploadFile(account, "f/a.txt", new Blob(["x"])), {
       message: 'Upload failed: Name "a/b" is not allowed & was rejected (HTTP 403).',
     });
+  });
+});
+
+describe("pollLoginFlow", () => {
+  const flow = { pollUrl: "https://cloud.example.com/login/v2/poll", token: "t" };
+
+  it("keeps waiting through a network error instead of abandoning the login", async () => {
+    let calls = 0;
+    routeFetch(() => {
+      calls++;
+      if (calls === 1) return [404];
+      if (calls === 2) throw new TypeError("NetworkError when attempting to fetch resource.");
+      return [200, JSON.stringify({ server: "https://cloud.example.com", loginName: "alice", appPassword: "secret" })];
+    });
+    const creds = await pollLoginFlow(flow, { intervalMs: 0 });
+    assert.equal(creds.appPassword, "secret");
+    assert.equal(calls, 3);
+  });
+
+  it("fails at once if the very first check cannot get through (unreachable or redirecting)", async () => {
+    let calls = 0;
+    routeFetch(() => {
+      calls++;
+      throw new TypeError("NetworkError when attempting to fetch resource.");
+    });
+    await assert.rejects(pollLoginFlow(flow, { intervalMs: 0, timeoutMs: 60000 }), /Could not check the login with cloud\.example\.com.*redirecting/);
+    assert.equal(calls, 1);
+  });
+
+  it("rides out a server or proxy error once the login check has worked", async () => {
+    const statuses = [404, 502, 503, 404];
+    routeFetch(() => {
+      const status = statuses.shift();
+      return status ? [status] : [200, JSON.stringify({ loginName: "alice", appPassword: "secret" })];
+    });
+    const creds = await pollLoginFlow(flow, { intervalMs: 0 });
+    assert.equal(creds.appPassword, "secret");
+  });
+
+  it("fails at once if the server errors on the very first check", async () => {
+    let calls = 0;
+    routeFetch(() => (calls++, [502]));
+    await assert.rejects(pollLoginFlow(flow, { intervalMs: 0, timeoutMs: 60000 }), /HTTP 502/);
+    assert.equal(calls, 1);
+  });
+
+  it("still stops when cancelled", async () => {
+    const controller = new AbortController();
+    routeFetch(() => {
+      controller.abort();
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    await assert.rejects(pollLoginFlow(flow, { signal: controller.signal, intervalMs: 0 }), /Login cancelled/);
+  });
+
+  it("refuses redirects for the poll request", async () => {
+    const calls = routeFetch(() => [200, JSON.stringify({ loginName: "a", appPassword: "p" })]);
+    await pollLoginFlow(flow, { intervalMs: 0 });
+    assert.equal(calls[0].init.redirect, "error");
   });
 });

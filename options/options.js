@@ -51,7 +51,7 @@ function saveAccount(patch) {
 function zeroExpiryText(policy) {
   if (!policy) return "0 = no expiry, unless the server sets a default.";
   if (policy.expireDefaultEnabled || policy.expireEnforced) {
-    return `0 = the server's default (${policy.expireDays} days).`;
+    return policy.expireDays ? `0 = the server's default (${policy.expireDays} days).` : "0 = the server's default.";
   }
   return "0 = the link never expires: this server sets no default.";
 }

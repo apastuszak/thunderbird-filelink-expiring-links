@@ -74,6 +74,13 @@ Caddy logs nothing for these 499s by default; add a `log` block to the site to g
 
 Fixed in 0.1.3. Thunderbird does not remember whether an add-on's Filelink account is set up, and older versions did not restore it on startup. Update the add-on; removing and re-adding the provider is no longer needed (and each time created a new app password, which you can delete under *Settings > Security > Devices & sessions* in Nextcloud).
 
+## Known limitations
+
+- **Removing an attachment from a reopened draft leaves the file on Nextcloud.** After a restart, Thunderbird reports the removal with a new ID and without the link, so the add-on cannot tell which upload it was. The file still expires as set, and its stored password is cleaned up after 90 days.
+- **Mail scanners can use up a one-time link.** Security gateways and link previews fetch links in incoming mail, and that counts as the one download. Combine one-time downloads with a password, which stops a scanner from downloading the file.
+- **Uninstalling does not revoke the app password.** Add-ons are not told when they are removed. Click *Disconnect* in the provider's settings before uninstalling, or delete the app password afterwards under *Settings > Security > Devices & sessions* in Nextcloud.
+- **Expiry is by date only.** Nextcloud's share API accepts a date, not a time; a link works until the end of that day in the time zone set in your Nextcloud account.
+
 ## Status
 
 Requires Thunderbird 128 or newer. Tested with Thunderbird 158 and Nextcloud AIO behind a Caddy reverse proxy. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing, and the Nextcloud logo used as the icon is a Nextcloud GmbH trademark. See `CLAUDE.md` for open items.

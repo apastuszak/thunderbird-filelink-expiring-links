@@ -40,7 +40,11 @@ const drafts = new Map(); // tabId -> { tabId, accountId, password, links, deliv
 // ---- storage helpers -------------------------------------------------------
 // One key per upload: parallel uploads would lose records if they shared one object.
 
-const uploadKey = (accountId, fileId) => `upload:${accountId}:${fileId}`;
+// Thunderbird numbers both fileIds and tab IDs from 1 again in every session (parent/ext-cloudFile.js,
+// parent/ext-mail.js), while records of unsent drafts outlive the session. So keys and the
+// "sent from this window" match include an ID for this run of the add-on.
+const SESSION = randomId();
+const uploadKey = (accountId, fileId) => `upload:${accountId}:${SESSION}:${fileId}`;
 const UPLOAD_PREFIX = "upload:";
 const PENDING_PREFIX = "pendingDelete:";
 // Records hold the link's password until the message is sent (then they are deleted), so drafts
@@ -73,6 +77,24 @@ const parentFolder = (davPath) => davPath.split("/").slice(0, -1).join("/");
 async function removeUpload(settings, { shareId, folder }) {
   if (shareId != null) await deleteShare(settings, shareId).catch(() => {}); // may already be gone
   await deleteFile(settings, folder);
+}
+
+/**
+ * Whether a saved upload or cleanup job was made on the server and user the account is connected
+ * to now. After Disconnect and Connect to another server or user, a saved share ID names a
+ * different, unrelated share there (IDs are sequential), so it must not be deleted. Saves from
+ * before the server was recorded cannot be checked and are skipped: at worst a file is left to expire.
+ */
+const madeHere = (settings, job) => !!job.server && job.server === settings.baseUrl && job.userId === settings.userId;
+
+/** Removes a saved upload if it belongs to the current connection. Returns false if it was skipped. */
+async function removeSavedUpload(settings, job) {
+  if (!madeHere(settings, job)) {
+    console.warn("Skipping cleanup of an upload made on another server or account.");
+    return false;
+  }
+  await removeUpload(settings, job);
+  return true;
 }
 
 function draftFor(accountId, tab) {
@@ -173,14 +195,26 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
     const draft = wantsPassword ? draftFor(account.id, tab) : null;
     const password = wantsPassword ? (draft?.password ?? randomPassword()) : undefined;
     const expiryDays = clampExpiryDays(settings.expiryDays, settings.policy);
-    const expireDate = expiryDays > 0 ? localDateFromNow(expiryDays) : undefined;
-    share = await createPublicShare(settings, {
-      path: "/" + davPath,
-      password,
-      expireDate,
-      label: "Thunderbird",
-      signal: controller.signal,
-    });
+    const createShare = (days) =>
+      createPublicShare(settings, {
+        path: "/" + davPath,
+        password,
+        expireDate: days > 0 ? localDateFromNow(days) : undefined,
+        label: "Thunderbird",
+        signal: controller.signal,
+      });
+    try {
+      share = await createShare(expiryDays);
+    } catch (e) {
+      // Nextcloud checks an enforced maximum against the date in the user's Nextcloud time zone,
+      // which can be a day behind this computer's; it then rejects the request rather than
+      // shortening it. Retry one day shorter, but only if Nextcloud answered (e.ocsStatus): after
+      // a network error the first share may exist, and a retry would add a second public link.
+      const max = Number(settings.policy?.expireDays);
+      const atMax = settings.policy?.expireEnforced && max > 1 && expiryDays >= max;
+      if (!atMax || e.ocsStatus == null || e.ocsStatus === 401 || controller.signal.aborted) throw e;
+      share = await createShare(expiryDays - 1);
+    }
 
     if (settings.oneTime) {
       try {
@@ -197,6 +231,9 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
         shareId: share.id,
         davPath,
         accountId: account.id,
+        server: settings.baseUrl,
+        userId: settings.userId,
+        session: SESSION,
         tabId: tab?.id,
         createdAt: Date.now(),
         url: share.url,
@@ -208,7 +245,9 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
 
     if (password) {
       draft?.links.set(fileInfo.id, { url: share.url, name: fileInfo.name, password, key });
-      announcePassword(fileInfo.name, password, draft, settings.passwordDelivery);
+      announcePassword(fileInfo.name, password, draft, settings.passwordDelivery).catch((e) =>
+        console.warn("Could not record how to deliver the link password:", e.message),
+      );
     }
 
     const templateInfo = {};
@@ -237,9 +276,15 @@ browser.cloudFile.onFileDeleted.addListener(async (account, fileId, tab) => {
   const key = uploadKey(account.id, fileId);
   const { [key]: info } = await browser.storage.local.get(key);
   if (!info) return;
-  const job = { accountId: account.id, shareId: info.shareId, folder: parentFolder(info.davPath) };
+  const job = {
+    accountId: account.id,
+    server: info.server,
+    userId: info.userId,
+    shareId: info.shareId,
+    folder: parentFolder(info.davPath),
+  };
   try {
-    await removeUpload(await getAccount(account.id), job);
+    await removeSavedUpload(await getAccount(account.id), job);
     await browser.storage.local.remove(key);
   } catch (e) {
     // Keep it under a key that a new upload with a reused fileId cannot overwrite; retried at startup.
@@ -382,7 +427,8 @@ browser.compose.onAfterSend.addListener(async (tab, sendInfo) => {
   drafts.delete(tab.id);
   const recovered = new Set([...(draft?.links.values() ?? [])].map((link) => link.key));
   const all = await browser.storage.local.get(null);
-  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && (all[k].tabId === tab.id || recovered.has(k)));
+  const ownWindow = (r) => r.session === SESSION && r.tabId === tab.id;
+  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && (ownWindow(all[k]) || recovered.has(k)));
   await browser.storage.local.remove(sent);
   if (draft?.delivery !== "separate" || !draft.recipients || !draft.links.size) return;
   // Opened as a draft, not sent: the user checks the recipients and sends it themselves.
@@ -394,7 +440,7 @@ async function retryPendingDeletes() {
   for (const [key, job] of Object.entries(all)) {
     if (!key.startsWith(PENDING_PREFIX)) continue;
     try {
-      await removeUpload(await getAccount(job.accountId), job);
+      await removeSavedUpload(await getAccount(job.accountId), job); // skipped jobs are dropped too
       await browser.storage.local.remove(key);
     } catch {
       // Offline or disconnected: try again next start.
