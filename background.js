@@ -278,4 +278,18 @@ async function retryPendingDeletes() {
   }
 }
 
+/**
+ * Thunderbird keeps an account's "configured" flag in memory only: every add-on account starts
+ * unconfigured (parent/ext-cloudFile.js) and shows a warning until told otherwise. Restore it
+ * from storage on every start.
+ */
+async function restoreConfiguredState() {
+  const { accounts = {} } = await browser.storage.local.get("accounts");
+  for (const account of await browser.cloudFile.getAllAccounts()) {
+    const configured = !!accounts[account.id]?.appPassword;
+    if (account.configured !== configured) await browser.cloudFile.updateAccount(account.id, { configured });
+  }
+}
+
+restoreConfiguredState();
 retryPendingDeletes();
