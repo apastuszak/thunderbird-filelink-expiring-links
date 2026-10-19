@@ -46,10 +46,10 @@ async function getAccount(accountId) {
   return { ...DEFAULTS, ...account };
 }
 
-/** Gives up the host permission once no connected account uses that server. */
+/** Gives up the host permission once no connected account needs it (the pattern covers all ports). */
 async function releaseOrigin(baseUrl, accounts) {
-  const origin = new URL(baseUrl).origin;
-  const inUse = Object.values(accounts).some((a) => a.appPassword && a.baseUrl && new URL(a.baseUrl).origin === origin);
+  const pattern = originPattern(baseUrl);
+  const inUse = Object.values(accounts).some((a) => a.appPassword && a.baseUrl && originPattern(a.baseUrl) === pattern);
   if (!inUse) await browser.permissions.remove({ origins: [originPattern(baseUrl)] }).catch(() => {});
 }
 

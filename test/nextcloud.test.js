@@ -390,3 +390,45 @@ describe("WebDAV error messages", () => {
     await assert.rejects(uploadFile(account, "f/a.txt", new Blob(["x"])), { message: "Upload failed (HTTP 400)." });
   });
 });
+
+describe("network failures", () => {
+  it("explain what to check instead of the browser's bare NetworkError", async () => {
+    routeFetch(() => {
+      throw new TypeError("NetworkError when attempting to fetch resource.");
+    });
+    await assert.rejects(createPublicShare(account, { path: "/a" }), (e) => {
+      assert.match(e.message, /^Could not reach Nextcloud at cloud\.example\.com\. .*Permissions.*redirect/);
+      assert.equal(e.cause.name, "TypeError");
+      return true;
+    });
+  });
+
+  it("leave cancelled requests recognisable as cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    routeFetch(() => {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    await assert.rejects(uploadFile(account, "f/a.txt", new Blob(["x"]), { signal: controller.signal }), { name: "AbortError" });
+  });
+
+  it("are reported per chunk during a chunked upload", async () => {
+    routeFetch((method) => {
+      if (method === "PUT") throw new TypeError("NetworkError when attempting to fetch resource.");
+      return [201];
+    });
+    await assert.rejects(
+      uploadFile(account, "f/big.bin", new Blob(["x".repeat(25)]), { chunkSize: 10, retryDelayMs: 0 }),
+      { message: /^Upload interrupted at part 1: Could not reach Nextcloud at cloud\.example\.com\./ },
+    );
+  });
+});
+
+describe("server error text", () => {
+  it("decodes numeric character references", async () => {
+    routeFetch(() => [403, "<d:error><s:message>Name &#34;a&#x2F;b&#34; is not allowed &amp; was rejected</s:message></d:error>"]);
+    await assert.rejects(uploadFile(account, "f/a.txt", new Blob(["x"])), {
+      message: 'Upload failed: Name "a/b" is not allowed & was rejected (HTTP 403).',
+    });
+  });
+});

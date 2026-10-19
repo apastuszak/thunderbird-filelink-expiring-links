@@ -13,9 +13,11 @@ Thunderbird Filelink provider for Nextcloud with expiring links, optional genera
 
 - The server must be reachable over HTTPS with a valid certificate (plain HTTP only for `localhost`).
 - Only a Nextcloud app password is stored, in the Thunderbird profile (`browser.storage.local`), unencrypted. Thunderbird gives add-ons no encrypted storage. Disconnecting or removing the account revokes the app password on the server.
-- Generated link passwords are copied to the clipboard, and a window asks how to deliver them: a separate email to the same recipients (opened as a draft for you to send), in the same email below the link, or by yourself. A separate email or another channel (text message, chat) keeps the password away from anyone who only sees the first email.
+- When a link gets a generated password, a window shows it and asks how to deliver it: a separate email to the same recipients (opened as a draft for you to send; the default), in the same email below the link, or by yourself. A separate email or another channel (text message, chat) keeps the password away from anyone who only sees the first email.
+- The password is copied to the clipboard only when you choose to send it yourself or click Copy, since the clipboard keeps it (and on a Mac, Universal Clipboard shares it with your other devices).
+- Requests that carry the app password never follow redirects, and share links are only put into an email if they use https.
 - The `compose` permission is used only to add the password to messages that contain this add-on's password-protected links.
 
 ## Status
 
-Early scaffold. One-time downloads depend on Nextcloud's Download Limit app and the endpoint used is not yet verified. See `CLAUDE.md` for the full list of open items.
+Requires Thunderbird 128 or newer. Tested with Thunderbird 158 and Nextcloud AIO behind a Caddy reverse proxy. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing, and the Nextcloud logo used as the icon is a Nextcloud GmbH trademark. See `CLAUDE.md` for open items.

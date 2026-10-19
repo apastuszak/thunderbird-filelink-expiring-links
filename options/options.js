@@ -87,11 +87,11 @@ browser.storage.onChanged.addListener(async (changes, area) => {
   if (area === "local" && changes.accounts) renderChoices(await loadAccount());
 });
 
-/** Gives up the host permission unless a connected account still uses that server. */
+/** Gives up the host permission unless a connected account still needs it (the pattern covers all ports). */
 async function releaseOriginIfUnused(baseUrl) {
   const { accounts = {} } = await browser.storage.local.get("accounts");
-  const origin = new URL(baseUrl).origin;
-  const inUse = Object.values(accounts).some((o) => o.appPassword && o.baseUrl && new URL(o.baseUrl).origin === origin);
+  const pattern = originPattern(baseUrl);
+  const inUse = Object.values(accounts).some((o) => o.appPassword && o.baseUrl && originPattern(o.baseUrl) === pattern);
   if (!inUse) await browser.permissions.remove({ origins: [originPattern(baseUrl)] }).catch(() => {});
 }
 
