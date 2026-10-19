@@ -177,14 +177,26 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
     const draft = wantsPassword ? draftFor(account.id, tab) : null;
     const password = wantsPassword ? (draft?.password ?? randomPassword()) : undefined;
     const expiryDays = clampExpiryDays(settings.expiryDays, settings.policy);
-    const expireDate = expiryDays > 0 ? localDateFromNow(expiryDays) : undefined;
-    share = await createPublicShare(settings, {
-      path: "/" + davPath,
-      password,
-      expireDate,
-      label: "Thunderbird",
-      signal: controller.signal,
-    });
+    const createShare = (days) =>
+      createPublicShare(settings, {
+        path: "/" + davPath,
+        password,
+        expireDate: days > 0 ? localDateFromNow(days) : undefined,
+        label: "Thunderbird",
+        signal: controller.signal,
+      });
+    try {
+      share = await createShare(expiryDays);
+    } catch (e) {
+      // Nextcloud checks an enforced maximum against the date in the user's Nextcloud time zone,
+      // which can be a day behind this computer's; it then rejects the request rather than
+      // shortening it. Retry one day shorter, but only if Nextcloud answered (e.ocsStatus): after
+      // a network error the first share may exist, and a retry would add a second public link.
+      const max = Number(settings.policy?.expireDays);
+      const atMax = settings.policy?.expireEnforced && max > 1 && expiryDays >= max;
+      if (!atMax || e.ocsStatus == null || e.ocsStatus === 401 || controller.signal.aborted) throw e;
+      share = await createShare(expiryDays - 1);
+    }
 
     if (settings.oneTime) {
       try {
@@ -213,7 +225,9 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
 
     if (password) {
       draft?.links.set(fileInfo.id, { url: share.url, name: fileInfo.name, password, key });
-      announcePassword(fileInfo.name, password, draft, settings.passwordDelivery);
+      announcePassword(fileInfo.name, password, draft, settings.passwordDelivery).catch((e) =>
+        console.warn("Could not record how to deliver the link password:", e.message),
+      );
     }
 
     const templateInfo = {};

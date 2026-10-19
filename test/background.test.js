@@ -3,12 +3,16 @@
 // Messages are plain text, so no HTML parser is needed.
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
+import { localDateFromNow } from "../lib/nextcloud.js";
 
 const store = {};
 const log = [];
 let listeners;
 let sessions = 0;
 let shares = 0;
+let shareRequests = [];
+let rejectShare = () => null; // (form) => Response to send instead of creating the share, or null
+let capabilities = {}; // what the fake server reports; background.js re-reads it on every start
 
 const clone = (value) => structuredClone(value);
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
@@ -54,13 +58,17 @@ function installBrowser() {
   });
   globalThis.fetch = async (url, init = {}) => {
     if (url.includes("/apps/files_sharing/api/v1/shares") && init.method === "POST") {
+      const form = Object.fromEntries(init.body);
+      shareRequests.push(form);
+      const rejection = rejectShare(form);
+      if (rejection) return rejection;
       shares++;
       const token = `tok${String(shares).padStart(12, "0")}`; // 15 characters, like Nextcloud's
       const data = { id: String(shares), token, url: `https://cloud.example.com/s/${token}`, expiration: null };
       return new Response(JSON.stringify({ ocs: { meta: { statuscode: 200 }, data } }), { status: 200 });
     }
     if (url.includes("/ocs/")) {
-      return new Response(JSON.stringify({ ocs: { meta: { statuscode: 200 }, data: { capabilities: {} } } }), { status: 200 });
+      return new Response(JSON.stringify({ ocs: { meta: { statuscode: 200 }, data: { capabilities } } }), { status: 200 });
     }
     return new Response(null, { status: 201 });
   };
@@ -101,6 +109,9 @@ const records = () => Object.entries(store).filter(([key]) => key.startsWith("up
 beforeEach(() => {
   for (const key of Object.keys(store)) delete store[key];
   log.length = 0;
+  shareRequests = [];
+  rejectShare = () => null;
+  capabilities = {};
   store.accounts = {
     acc1: {
       baseUrl: "https://cloud.example.com",
@@ -165,5 +176,47 @@ describe("password links across Thunderbird sessions", () => {
     await startSession();
     const result = await send(4, plainMessage(`Hi\nLink: ${link}.\nThanks`));
     assert.equal(result.details.plainTextBody, `Hi\nLink: ${link}.\nPassword: ${password}\nThanks`);
+  });
+});
+
+describe("expiry at the server's enforced maximum", () => {
+  const ocsError = (message) =>
+    new Response(JSON.stringify({ ocs: { meta: { statuscode: 404, message }, data: [] } }), { status: 404 });
+
+  beforeEach(() => {
+    capabilities = { files_sharing: { public: { expire_date: { enabled: true, enforced: true, days: 7 } } } };
+    Object.assign(store.accounts.acc1, { generatePassword: false, expiryDays: 7 });
+  });
+
+  it("retries one day shorter when Nextcloud's date for the user is a day behind", async () => {
+    // Nextcloud's "today" is yesterday here, so today + 7 is 8 days away for it.
+    rejectShare = (form) =>
+      form.expireDate === localDateFromNow(7) ? ocsError("Cannot set expiration date more than 7 days in the future") : null;
+    await startSession();
+    const result = await upload(1, 3);
+    assert.deepEqual(shareRequests.map((f) => f.expireDate), [localDateFromNow(7), localDateFromNow(6)]);
+    assert.match(result.url ?? "", /^https:\/\/cloud\.example\.com\/s\//);
+  });
+
+  it("does not retry after a network error, which may already have created the share", async () => {
+    let first = true;
+    rejectShare = () => {
+      if (!first) return null;
+      first = false;
+      throw new TypeError("NetworkError when attempting to fetch resource.");
+    };
+    await startSession();
+    const result = await upload(1, 3);
+    assert.equal(shareRequests.length, 1);
+    assert.match(result.error ?? "", /Could not reach Nextcloud/);
+  });
+
+  it("does not retry below the maximum", async () => {
+    store.accounts.acc1.expiryDays = 3;
+    rejectShare = () => ocsError("Some other problem");
+    await startSession();
+    const result = await upload(1, 3);
+    assert.equal(shareRequests.length, 1);
+    assert.equal(result.error, "Some other problem");
   });
 });

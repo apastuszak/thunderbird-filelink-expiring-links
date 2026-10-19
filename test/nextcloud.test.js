@@ -8,6 +8,7 @@ import {
   checkShareUrl,
   MAX_CHUNK_SIZE,
   originPattern,
+  pollLoginFlow,
   serverInfo,
   localDateFromNow,
   normalizeBaseUrl,
@@ -430,5 +431,37 @@ describe("server error text", () => {
     await assert.rejects(uploadFile(account, "f/a.txt", new Blob(["x"])), {
       message: 'Upload failed: Name "a/b" is not allowed & was rejected (HTTP 403).',
     });
+  });
+});
+
+describe("pollLoginFlow", () => {
+  const flow = { pollUrl: "https://cloud.example.com/login/v2/poll", token: "t" };
+
+  it("keeps waiting through a network error instead of abandoning the login", async () => {
+    let calls = 0;
+    routeFetch(() => {
+      calls++;
+      if (calls === 1) return [404];
+      if (calls === 2) throw new TypeError("NetworkError when attempting to fetch resource.");
+      return [200, JSON.stringify({ server: "https://cloud.example.com", loginName: "alice", appPassword: "secret" })];
+    });
+    const creds = await pollLoginFlow(flow, { intervalMs: 0 });
+    assert.equal(creds.appPassword, "secret");
+    assert.equal(calls, 3);
+  });
+
+  it("still stops when cancelled", async () => {
+    const controller = new AbortController();
+    routeFetch(() => {
+      controller.abort();
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    await assert.rejects(pollLoginFlow(flow, { signal: controller.signal, intervalMs: 0 }), /Login cancelled/);
+  });
+
+  it("refuses redirects for the poll request", async () => {
+    const calls = routeFetch(() => [200, JSON.stringify({ loginName: "a", appPassword: "p" })]);
+    await pollLoginFlow(flow, { intervalMs: 0 });
+    assert.equal(calls[0].init.redirect, "error");
   });
 });
