@@ -15,7 +15,13 @@ import {
   setDownloadLimit,
   uploadFile,
 } from "./lib/nextcloud.js";
-import { addPasswordToHtml, addPasswordToPlainText, passwordMessage } from "./lib/message.js";
+import {
+  addPasswordToHtml,
+  addPasswordToPlainText,
+  findLinksInHtml,
+  findLinksInPlainText,
+  passwordMessage,
+} from "./lib/message.js";
 
 const DEFAULTS = {
   folder: "Thunderbird attachments",
@@ -26,8 +32,9 @@ const DEFAULTS = {
 };
 
 const aborters = new Map(); // fileId -> AbortController
-// Per compose tab: one password shared by all its links, the links that use it (fileId -> url),
-// and how the user wants the password delivered. Kept in memory only.
+// Per compose tab: one password shared by its new links, the links (fileId -> { url, name, password,
+// key }), and how the user wants the password delivered. Mirrored in the upload records, so a draft
+// reopened in a later session can be recovered at send time (see recoverDraft).
 const drafts = new Map(); // tabId -> { tabId, accountId, password, links, delivery, recipients }
 
 // ---- storage helpers -------------------------------------------------------
@@ -36,7 +43,8 @@ const drafts = new Map(); // tabId -> { tabId, accountId, password, links, deliv
 const uploadKey = (accountId, fileId) => `upload:${accountId}:${fileId}`;
 const UPLOAD_PREFIX = "upload:";
 const PENDING_PREFIX = "pendingDelete:";
-// Records are only needed while a message is being written; drop leftovers (drafts kept for months).
+// Records hold the link's password until the message is sent (then they are deleted), so drafts
+// survive a restart. Drop leftovers, e.g. drafts kept for months or never sent.
 const UPLOAD_RECORD_MAX_AGE = 90 * 24 * 60 * 60 * 1000;
 
 async function getAccount(accountId) {
@@ -87,6 +95,14 @@ const DELIVERY_NOTES = {
   self: "Send it to the recipient separately, not in this email.",
 };
 
+/** Saves the message's delivery choice with its upload records, for recovery after a restart. */
+async function persistDelivery(draft) {
+  const keys = [...draft.links.values()].map((link) => link.key);
+  const stored = await browser.storage.local.get(keys);
+  for (const record of Object.values(stored)) record.delivery = draft.delivery;
+  await browser.storage.local.set(stored);
+}
+
 /**
  * For when the user sends the password themselves: copy it, and only if that fails show it in a
  * notification (which may linger in the notification centre).
@@ -110,12 +126,14 @@ async function announcePassword(fileName, password, draft, preference) {
   if (draft.delivery) return; // already decided for this message
   if (preference !== "ask" && DELIVERY_NOTES[preference]) {
     draft.delivery = preference;
+    await persistDelivery(draft);
     if (preference === "self") return handOverPassword(fileName, password);
     notify("Link password", `${fileName}: ${DELIVERY_NOTES[preference]}`);
     return;
   }
   // Matches the option the window shows selected, so closing it does what it showed.
   draft.delivery = "separate";
+  await persistDelivery(draft);
   try {
     await browser.windows.create({
       url: `/password/password.html?tabId=${draft.tabId}`,
@@ -126,6 +144,7 @@ async function announcePassword(fileName, password, draft, preference) {
   } catch (e) {
     console.warn("Could not open the password window:", e.message);
     draft.delivery = "self";
+    await persistDelivery(draft);
     await handOverPassword(fileName, password);
   }
 }
@@ -172,12 +191,23 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
       }
     }
 
+    const key = uploadKey(account.id, fileInfo.id);
     await browser.storage.local.set({
-      [uploadKey(account.id, fileInfo.id)]: { shareId: share.id, davPath, tabId: tab?.id, createdAt: Date.now() },
+      [key]: {
+        shareId: share.id,
+        davPath,
+        accountId: account.id,
+        tabId: tab?.id,
+        createdAt: Date.now(),
+        url: share.url,
+        name: fileInfo.name,
+        password,
+        delivery: draft?.delivery ?? null,
+      },
     });
 
     if (password) {
-      draft?.links.set(fileInfo.id, share.url);
+      draft?.links.set(fileInfo.id, { url: share.url, name: fileInfo.name, password, key });
       announcePassword(fileInfo.name, password, draft, settings.passwordDelivery);
     }
 
@@ -249,6 +279,7 @@ browser.runtime.onMessage.addListener(async (message) => {
   }
   if (message.type === "password:set" && DELIVERY_NOTES[message.delivery]) {
     draft.delivery = message.delivery;
+    await persistDelivery(draft);
     if (message.remember) {
       const { accounts = {} } = await browser.storage.local.get("accounts");
       if (accounts[draft.accountId]) {
@@ -261,8 +292,59 @@ browser.runtime.onMessage.addListener(async (message) => {
   return null;
 });
 
+/**
+ * A message may contain this add-on's password links that its compose window knows nothing about:
+ * a draft reopened after closing it or after a restart, possibly with new links added since. Find
+ * them by URL among the stored upload records, outside quoted text, and merge them into `draft`
+ * (or recover one, restoring the delivery choice saved for them). Returns the resulting draft.
+ */
+async function recoverDraft(tabId, details, draft) {
+  const all = await browser.storage.local.get(null);
+  const known = new Set([...(draft?.links.values() ?? [])].map((link) => link.key));
+  const records = Object.entries(all).filter(
+    ([k, r]) => k.startsWith(UPLOAD_PREFIX) && r.password && r.url && !known.has(k),
+  );
+  if (!records.length) return draft;
+  const urls = records.map(([, r]) => r.url);
+  const found = details.isPlainText
+    ? findLinksInPlainText(details.plainTextBody ?? "", urls)
+    : findLinksInHtml(new DOMParser().parseFromString(details.body ?? "", "text/html"), urls);
+  const mine = records.filter(([, r]) => found.includes(r.url));
+  if (!mine.length) return draft;
+  const links = mine.map(([key, r]) => [key, { url: r.url, name: r.name, password: r.password, key }]);
+
+  if (draft?.delivery) {
+    // Older links in a message that also has new ones: deliver them the same way.
+    for (const [key, link] of links) draft.links.set(key, link);
+    await persistDelivery(draft);
+    return draft;
+  }
+
+  const accountId = mine[0][1].accountId;
+  let delivery = mine.map(([, r]) => r.delivery).find((d) => DELIVERY_NOTES[d]);
+  if (!delivery) {
+    // Never asked (the window was not answered before closing): no time to ask now, mid-send.
+    const preference = (await getAccount(accountId).catch(() => null))?.passwordDelivery;
+    delivery = DELIVERY_NOTES[preference] ? preference : "separate";
+  }
+  const recovered = { tabId, accountId, password: mine[0][1].password, links: new Map(links), delivery };
+  drafts.set(tabId, recovered);
+  if (delivery === "self") {
+    // The clipboard from the earlier session is long gone.
+    await handOverPassword(mine[0][1].name, recovered.password);
+  } else {
+    notify("Link password", `This message has password-protected links from an earlier session. ${DELIVERY_NOTES[delivery]}`);
+  }
+  return recovered;
+}
+
 browser.compose.onBeforeSend.addListener(async (tab, details) => {
-  const draft = drafts.get(tab.id);
+  // Recovery must never block sending: on any error, carry on with what this window knows.
+  const current = drafts.get(tab.id);
+  const draft = await recoverDraft(tab.id, details, current).catch((e) => {
+    console.warn("Could not check the message for earlier password links:", e.message);
+    return current;
+  });
   if (!draft?.links.size) return {};
   if (draft.delivery === "separate") {
     const { to, cc, bcc, subject, identityId } = details;
@@ -273,16 +355,17 @@ browser.compose.onBeforeSend.addListener(async (tab, details) => {
   // Thunderbird waits for this listener and never completes the send if it throws, leaving the
   // compose window locked. So never throw: cancel instead, and fall back to a separate email.
   try {
-    const urls = [...draft.links.values()];
+    const entries = [...draft.links.values()];
     if (details.isPlainText) {
-      return { details: { plainTextBody: addPasswordToPlainText(details.plainTextBody, urls, draft.password) } };
+      return { details: { plainTextBody: addPasswordToPlainText(details.plainTextBody, entries) } };
     }
     const doc = new DOMParser().parseFromString(details.body, "text/html");
-    addPasswordToHtml(doc, urls, draft.password);
+    addPasswordToHtml(doc, entries);
     return { details: { body: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}` } };
   } catch (e) {
     console.warn("Could not add the link password to the message:", e.message);
     draft.delivery = "separate";
+    await persistDelivery(draft).catch(() => {});
     notify(
       "Message not sent",
       "The link password could not be added to this message. Click Send again to send it without the password; a separate email with the password will then open.",
@@ -293,15 +376,17 @@ browser.compose.onBeforeSend.addListener(async (tab, details) => {
 
 browser.compose.onAfterSend.addListener(async (tab, sendInfo) => {
   if (sendInfo.error) return; // keep the draft state; the user may try sending again
-  // Sent attachments are never deleted through cloudFile, so their cleanup records are done with.
-  const all = await browser.storage.local.get(null);
-  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && all[k].tabId === tab.id);
-  await browser.storage.local.remove(sent);
+  // Sent attachments are never deleted through cloudFile, so their records (and stored passwords)
+  // are done with: this window's own, and any recovered from an earlier session.
   const draft = drafts.get(tab.id);
   drafts.delete(tab.id);
+  const recovered = new Set([...(draft?.links.values() ?? [])].map((link) => link.key));
+  const all = await browser.storage.local.get(null);
+  const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && (all[k].tabId === tab.id || recovered.has(k)));
+  await browser.storage.local.remove(sent);
   if (draft?.delivery !== "separate" || !draft.recipients || !draft.links.size) return;
   // Opened as a draft, not sent: the user checks the recipients and sends it themselves.
-  await browser.compose.beginNew(passwordMessage(draft.recipients, draft.password, draft.links.size));
+  await browser.compose.beginNew(passwordMessage(draft.recipients, [...draft.links.values()]));
 });
 
 async function retryPendingDeletes() {

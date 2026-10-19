@@ -47,6 +47,15 @@ function saveAccount(patch) {
   return run;
 }
 
+/** What an expiry of 0 days actually does on this server. */
+function zeroExpiryText(policy) {
+  if (!policy) return "0 = no expiry, unless the server sets a default.";
+  if (policy.expireDefaultEnabled || policy.expireEnforced) {
+    return `0 = the server's default (${policy.expireDays} days).`;
+  }
+  return "0 = the link never expires: this server sets no default.";
+}
+
 function policyText(policy) {
   if (!policy) return "";
   let text = "";
@@ -66,7 +75,7 @@ function renderChoices(a) {
   $("onetime-hint").textContent =
     a.downloadLimit === false ? "Not available: the Download Limit app is not installed on this server." : "";
   $("delivery").value = a.passwordDelivery;
-  $("policy").textContent = policyText(a.policy);
+  $("policy").textContent = [zeroExpiryText(a.policy), policyText(a.policy)].filter(Boolean).join(" ");
 }
 
 async function render() {
@@ -103,11 +112,13 @@ $("connect-btn").addEventListener("click", async () => {
     return setStatus(e.message, true);
   }
   let account;
+  // Before any await: a second click while the permission prompt is open would start a second
+  // login and leave its app password orphaned on the server.
+  $("connect-btn").disabled = true;
   try {
     // Must be the first await so it still counts as a user gesture.
     const granted = await browser.permissions.request({ origins: [originPattern(baseUrl)] });
     if (!granted) return setStatus("Permission to contact that server was denied.", true);
-    $("connect-btn").disabled = true;
 
     setStatus("Checking server…");
     await checkServer(baseUrl);
