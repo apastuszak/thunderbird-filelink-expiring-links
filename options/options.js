@@ -1,6 +1,7 @@
 // Settings page, loaded by Thunderbird inside the account settings with ?accountId=<id>.
 import {
   checkServer,
+  chunkSizeFromCapabilities,
   clampExpiryDays,
   getCapabilities,
   getCurrentUser,
@@ -91,9 +92,11 @@ $("connect-btn").addEventListener("click", async () => {
 
     account = { baseUrl, loginName: creds.loginName, appPassword: creds.appPassword };
     const user = await getCurrentUser(account);
-    const policy = sharePolicy(await getCapabilities(account));
+    const capabilities = await getCapabilities(account);
+    const policy = sharePolicy(capabilities);
+    const chunkSize = chunkSizeFromCapabilities(capabilities);
 
-    const patch = { ...account, userId: user.id, displayName: user.displayName, policy };
+    const patch = { ...account, userId: user.id, displayName: user.displayName, policy, chunkSize };
     if (policy.passwordEnforced) patch.generatePassword = true;
     await saveAccount(patch);
     account = null; // stored now; no longer ours to revoke

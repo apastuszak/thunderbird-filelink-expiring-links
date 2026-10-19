@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import {
+  chunkSizeFromCapabilities,
   clampExpiryDays,
   createPublicShare,
+  MAX_CHUNK_SIZE,
   localDateFromNow,
   normalizeBaseUrl,
   parseShareDate,
@@ -21,6 +23,18 @@ function mockFetch(status, body) {
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init });
     return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
+  };
+  return calls;
+}
+
+/** Replaces fetch with `handler(method, url, init)`, which returns [status, body] or throws. */
+function routeFetch(handler) {
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method || "GET";
+    calls.push({ method, url, init });
+    const [status, body = ""] = await handler(method, url, init);
+    return new Response(body, { status });
   };
   return calls;
 }
@@ -171,5 +185,89 @@ describe("WebDAV", () => {
     await assert.rejects(uploadFile(account, "a/b.txt", new Blob(["x"])), /storage space/);
     mockFetch(413, "");
     await assert.rejects(uploadFile(account, "a/b.txt", new Blob(["x"])), /larger than the server/);
+  });
+});
+
+describe("chunked upload", () => {
+  const fast = { retryDelayMs: 0, pollIntervalMs: 0 };
+  const dest = "https://cloud.example.com/remote.php/dav/files/alice/f/big.bin";
+  const blob = new Blob(["x".repeat(25)]);
+
+  it("picks the chunk size from capabilities", () => {
+    assert.equal(chunkSizeFromCapabilities({ files: { chunked_upload: { max_size: 10 * 1024 * 1024 } } }), 10 * 1024 * 1024);
+    assert.equal(chunkSizeFromCapabilities({ files: { chunked_upload: { max_size: 100 * 1024 * 1024 } } }), MAX_CHUNK_SIZE);
+    assert.equal(chunkSizeFromCapabilities({ files: { chunked_upload: { max_size: 0 } } }), 0);
+    assert.equal(chunkSizeFromCapabilities({}), MAX_CHUNK_SIZE);
+  });
+
+  it("uses a single PUT for files that fit in one chunk", async () => {
+    const calls = routeFetch(() => [201]);
+    await uploadFile(account, "f/small.bin", new Blob(["12345"]), { chunkSize: 10, ...fast });
+    assert.deepEqual(calls.map((c) => c.method), ["PUT"]);
+  });
+
+  it("uploads numbered chunks and moves .file into place", async () => {
+    const calls = routeFetch(() => [201]);
+    await uploadFile(account, "f/big.bin", blob, { chunkSize: 10, ...fast });
+    assert.deepEqual(calls.map((c) => c.method), ["MKCOL", "PUT", "PUT", "PUT", "MOVE"]);
+    const base = calls[0].url;
+    assert.match(base, /^https:\/\/cloud\.example\.com\/remote\.php\/dav\/uploads\/alice\/thunderbird-[0-9a-f]{16}$/);
+    assert.deepEqual(calls.slice(1, 4).map((c) => [c.url, c.init.body.size]), [[`${base}/1`, 10], [`${base}/2`, 10], [`${base}/3`, 5]]);
+    assert.equal(calls[4].url, `${base}/.file`);
+    assert.equal(calls[4].init.headers["OC-Total-Length"], "25");
+    for (const c of calls) assert.equal(c.init.headers.Destination, dest);
+  });
+
+  it("retries a chunk after a transient error", async () => {
+    let failures = 1;
+    const calls = routeFetch((method, url) => [method === "PUT" && url.endsWith("/2") && failures-- > 0 ? 502 : 201]);
+    await uploadFile(account, "f/big.bin", blob, { chunkSize: 10, ...fast });
+    assert.equal(calls.filter((c) => c.method === "PUT").length, 4);
+  });
+
+  it("cancels the upload folder and explains a permanent failure", async () => {
+    const calls = routeFetch((method) => [method === "PUT" ? 507 : 201]);
+    await assert.rejects(uploadFile(account, "f/big.bin", blob, { chunkSize: 10, ...fast }), /storage space/);
+    assert.deepEqual(calls.map((c) => c.method), ["MKCOL", "PUT", "DELETE"]);
+    assert.equal(calls[2].url, calls[0].url);
+  });
+
+  it("gives up on a chunk after repeated proxy errors", async () => {
+    const calls = routeFetch((method) => [method === "PUT" ? 499 : 201]);
+    await assert.rejects(uploadFile(account, "f/big.bin", blob, { chunkSize: 10, ...fast }), /proxy in front of Nextcloud.*HTTP 499/);
+    assert.equal(calls.filter((c) => c.method === "PUT").length, 4);
+    assert.equal(calls.at(-1).method, "DELETE");
+  });
+
+  it("waits for the file when a proxy drops the final MOVE", async () => {
+    let polls = 0;
+    const calls = routeFetch((method) => {
+      if (method === "MOVE") return [504];
+      if (method === "PROPFIND") {
+        polls++;
+        const length = polls < 2 ? 10 : 25; // still assembling, then done
+        return [207, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:getcontentlength>${length}</d:getcontentlength></d:prop></d:propstat></d:response></d:multistatus>`];
+      }
+      return [201];
+    });
+    await uploadFile(account, "f/big.bin", blob, { chunkSize: 10, ...fast });
+    assert.equal(polls, 2);
+    assert.equal(calls.filter((c) => c.method === "PROPFIND")[0].url, dest);
+  });
+
+  it("stops and cleans up when cancelled", async () => {
+    const controller = new AbortController();
+    const calls = routeFetch((method, url, init) => {
+      if (method === "PUT" && url.endsWith("/2")) controller.abort();
+      if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
+      return [201];
+    });
+    await assert.rejects(uploadFile(account, "f/big.bin", blob, { chunkSize: 10, signal: controller.signal, ...fast }));
+    assert.deepEqual(calls.map((c) => c.method), ["MKCOL", "PUT", "PUT", "DELETE"]);
+  });
+
+  it("explains a proxy error on a single PUT", async () => {
+    routeFetch(() => [499]);
+    await assert.rejects(uploadFile(account, "f/small.bin", new Blob(["1"]), fast), /proxy in front of Nextcloud/);
   });
 });
