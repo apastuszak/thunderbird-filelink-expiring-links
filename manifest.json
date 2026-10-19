@@ -3,7 +3,7 @@
   "name": "Nextcloud Expiring Links",
   "short_name": "NC Links",
   "description": "Filelink provider for Nextcloud with expiring and one-time download links.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Andy Pastuszak",
   "homepage_url": "https://github.com/apastuszak/thunderbird-filelink-expiring-links",
   "browser_specific_settings": {
@@ -21,6 +21,6 @@
     "management_url": "/options/options.html",
     "reuse_uploads": false
   },
-  "permissions": ["storage", "notifications", "clipboardWrite"],
+  "permissions": ["storage", "notifications", "clipboardWrite", "compose"],
   "optional_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
 }

@@ -13,16 +13,20 @@ import {
   setDownloadLimit,
   uploadFile,
 } from "./lib/nextcloud.js";
+import { addPasswordToHtml, addPasswordToPlainText, passwordMessage } from "./lib/message.js";
 
 const DEFAULTS = {
   folder: "Thunderbird attachments",
   expiryDays: 7, // 0 = no expiry requested (server policy may still apply)
   oneTime: false,
   generatePassword: false,
+  passwordDelivery: "ask", // ask | separate | same | self
 };
 
 const aborters = new Map(); // fileId -> AbortController
-const tabPasswords = new Map(); // `${accountId}:${tabId}` -> password, so all links in one message share it
+// Per compose tab: one password shared by all its links, the links that use it (fileId -> url),
+// and how the user wants the password delivered. Kept in memory only.
+const drafts = new Map(); // tabId -> { tabId, accountId, password, links, delivery, recipients }
 
 // ---- storage helpers -------------------------------------------------------
 // One key per upload: parallel uploads would lose records if they shared one object.
@@ -58,32 +62,54 @@ async function removeUpload(settings, { shareId, folder }) {
   await deleteFile(settings, folder);
 }
 
-function passwordFor(accountId, tab) {
-  if (tab?.id == null) return { password: randomPassword(), reused: false };
-  const key = `${accountId}:${tab.id}`;
-  if (tabPasswords.has(key)) return { password: tabPasswords.get(key), reused: true };
-  const password = randomPassword();
-  tabPasswords.set(key, password);
-  return { password, reused: false };
+function draftFor(accountId, tab) {
+  if (tab?.id == null) return null;
+  let draft = drafts.get(tab.id);
+  if (!draft) {
+    draft = { tabId: tab.id, accountId, password: randomPassword(), links: new Map(), delivery: null };
+    drafts.set(tab.id, draft);
+  }
+  return draft;
 }
 
 function notify(title, message) {
   browser.notifications.create({ type: "basic", title, message });
 }
 
-/** Copies the password rather than showing it, so it does not linger in the notification centre. */
-async function deliverPassword(fileName, password, reused) {
-  const same = reused ? " It is the same password as the other links in this message." : "";
-  try {
-    await navigator.clipboard.writeText(password);
-    notify(
-      "Link password copied",
-      `${fileName}: the password is on your clipboard. Send it to the recipient separately, not in this email.${same}`,
-    );
-  } catch {
-    // Without the clipboard, the notification is the only way to get the password to the user.
-    notify("Link password", `${fileName}: ${password}\nSend it to the recipient separately.${same}`);
+const DELIVERY_NOTES = {
+  separate: "After you send this message, a second email with the password opens for you to send.",
+  same: "The password will be added below the link when you send this message.",
+  self: "Send it to the recipient separately, not in this email.",
+};
+
+/**
+ * Copies the password, then asks once per message how to deliver it (or applies the saved choice).
+ * The password is only shown in a notification if neither the clipboard nor a compose tab is available.
+ */
+async function announcePassword(fileName, password, draft, preference) {
+  const copied = await navigator.clipboard.writeText(password).then(
+    () => true,
+    () => false,
+  );
+  if (!draft) {
+    if (copied) notify("Link password copied", `${fileName}: the password is on your clipboard. ${DELIVERY_NOTES.self}`);
+    else notify("Link password", `${fileName}: ${password}\n${DELIVERY_NOTES.self}`);
+    return;
   }
+  if (draft.delivery) return; // already decided for this message
+  if (preference !== "ask" && DELIVERY_NOTES[preference]) {
+    draft.delivery = preference;
+    if (copied) notify("Link password copied", `${fileName}: ${DELIVERY_NOTES[preference]}`);
+    else notify("Link password", `${fileName}: ${password}\n${DELIVERY_NOTES[preference]}`);
+    return;
+  }
+  draft.delivery = "self"; // until the user picks something else
+  await browser.windows.create({
+    url: `/password/password.html?tabId=${draft.tabId}`,
+    type: "popup",
+    width: 480,
+    height: 460,
+  });
 }
 
 // ---- cloudFile listeners ---------------------------------------------------
@@ -104,7 +130,8 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
     await uploadFile(settings, davPath, fileInfo.data, { signal: controller.signal });
 
     const wantsPassword = settings.generatePassword || settings.policy?.passwordEnforced;
-    const { password, reused } = wantsPassword ? passwordFor(account.id, tab) : {};
+    const draft = wantsPassword ? draftFor(account.id, tab) : null;
+    const password = wantsPassword ? (draft?.password ?? randomPassword()) : undefined;
     const expiryDays = clampExpiryDays(settings.expiryDays, settings.policy);
     const expireDate = expiryDays > 0 ? localDateFromNow(expiryDays) : undefined;
     share = await createPublicShare(settings, {
@@ -126,7 +153,10 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
 
     await browser.storage.local.set({ [uploadKey(account.id, fileInfo.id)]: { shareId: share.id, davPath } });
 
-    if (password) deliverPassword(fileInfo.name, password, reused);
+    if (password) {
+      draft?.links.set(fileInfo.id, share.url);
+      announcePassword(fileInfo.name, password, draft, settings.passwordDelivery);
+    }
 
     const templateInfo = {};
     const expiresAt = parseShareDate(share.expiration);
@@ -149,7 +179,8 @@ browser.cloudFile.onFileUploadAbort.addListener((account, fileId) => {
   aborters.get(fileId)?.abort();
 });
 
-browser.cloudFile.onFileDeleted.addListener(async (account, fileId) => {
+browser.cloudFile.onFileDeleted.addListener(async (account, fileId, tab) => {
+  if (tab?.id != null) drafts.get(tab.id)?.links.delete(fileId);
   const key = uploadKey(account.id, fileId);
   const { [key]: info } = await browser.storage.local.get(key);
   if (!info) return;
@@ -182,8 +213,56 @@ browser.cloudFile.onAccountDeleted.addListener(async (accountId) => {
   if (account?.baseUrl) await releaseOrigin(account.baseUrl, accounts);
 });
 
-browser.tabs.onRemoved.addListener((tabId) => {
-  for (const key of tabPasswords.keys()) if (key.endsWith(`:${tabId}`)) tabPasswords.delete(key);
+browser.tabs.onRemoved.addListener((tabId) => drafts.delete(tabId));
+
+// ---- password delivery -----------------------------------------------------
+
+// The password window (password/password.js) reads the password and reports the user's choice.
+browser.runtime.onMessage.addListener(async (message) => {
+  const draft = drafts.get(message?.tabId);
+  if (!draft) return null;
+  if (message.type === "password:get") {
+    return { password: draft.password, links: draft.links.size, delivery: draft.delivery };
+  }
+  if (message.type === "password:set" && DELIVERY_NOTES[message.delivery]) {
+    draft.delivery = message.delivery;
+    if (message.remember) {
+      const { accounts = {} } = await browser.storage.local.get("accounts");
+      if (accounts[draft.accountId]) {
+        accounts[draft.accountId].passwordDelivery = message.delivery;
+        await browser.storage.local.set({ accounts });
+      }
+    }
+    return true;
+  }
+  return null;
+});
+
+browser.compose.onBeforeSend.addListener(async (tab, details) => {
+  const draft = drafts.get(tab.id);
+  if (!draft?.links.size) return {};
+  if (draft.delivery === "separate") {
+    const { to, cc, bcc, subject, identityId } = details;
+    draft.recipients = { to, cc, bcc, subject, identityId };
+    return {};
+  }
+  if (draft.delivery !== "same") return {};
+  const urls = [...draft.links.values()];
+  if (details.isPlainText) {
+    return { details: { plainTextBody: addPasswordToPlainText(details.plainTextBody, urls, draft.password) } };
+  }
+  const doc = new DOMParser().parseFromString(details.body, "text/html");
+  addPasswordToHtml(doc, urls, draft.password);
+  return { details: { body: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}` } };
+});
+
+browser.compose.onAfterSend.addListener(async (tab, sendInfo) => {
+  if (sendInfo.error) return; // keep the draft state; the user may try sending again
+  const draft = drafts.get(tab.id);
+  drafts.delete(tab.id);
+  if (draft?.delivery !== "separate" || !draft.recipients || !draft.links.size) return;
+  // Opened as a draft, not sent: the user checks the recipients and sends it themselves.
+  await browser.compose.beginNew(passwordMessage(draft.recipients, draft.password, draft.links.size));
 });
 
 async function retryPendingDeletes() {
