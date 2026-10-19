@@ -1,6 +1,8 @@
 # Expiring Links for Self-Hosted Cloud Storage
 
-Thunderbird Filelink provider with expiring links, optional generated passwords and an optional one-time download limit. **Works with Nextcloud.**
+Thunderbird Filelink provider with expiring links, optional generated passwords and an optional one-time download limit.
+
+**Works with Nextcloud.** Tested on Nextcloud 35 (AIO, behind a Caddy reverse proxy) with Thunderbird 158.
 
 ## Try it
 
@@ -83,7 +85,7 @@ Fixed in 0.1.3. Thunderbird does not remember whether an add-on's Filelink accou
 
 ## Status
 
-Requires Thunderbird 128 or newer. Tested with Thunderbird 158 and Nextcloud AIO behind a Caddy reverse proxy. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing. See `CLAUDE.md` for open items.
+Requires Thunderbird 128 or newer. Tested on Nextcloud 35 (AIO, behind a Caddy reverse proxy) with Thunderbird 158. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing. See `CLAUDE.md` for open items.
 
 ## License
 
