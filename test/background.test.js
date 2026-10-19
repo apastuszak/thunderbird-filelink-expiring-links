@@ -13,6 +13,7 @@ let shares = 0;
 let shareRequests = [];
 let rejectShare = () => null; // (form) => Response to send instead of creating the share, or null
 let capabilities = {}; // what the fake server reports; background.js re-reads it on every start
+let requests = []; // every request background.js makes: { method, url }
 
 const clone = (value) => structuredClone(value);
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
@@ -57,6 +58,7 @@ function installBrowser() {
     configurable: true,
   });
   globalThis.fetch = async (url, init = {}) => {
+    requests.push({ method: init.method || "GET", url });
     if (url.includes("/apps/files_sharing/api/v1/shares") && init.method === "POST") {
       const form = Object.fromEntries(init.body);
       shareRequests.push(form);
@@ -112,6 +114,7 @@ beforeEach(() => {
   shareRequests = [];
   rejectShare = () => null;
   capabilities = {};
+  requests = [];
   store.accounts = {
     acc1: {
       baseUrl: "https://cloud.example.com",
@@ -227,5 +230,46 @@ describe("expiry at the server's enforced maximum", () => {
     const result = await upload(1, 3);
     assert.equal(shareRequests.length, 1);
     assert.equal(result.error, "Some other problem");
+  });
+});
+
+describe("cleanup after switching server or user", () => {
+  const deletes = () => requests.filter((r) => r.method === "DELETE");
+
+  it("still cleans up on the same server and account", async () => {
+    await startSession();
+    await upload(1, 3);
+    const { shareId } = records()[0][1];
+    await listeners.deleted({ id: "acc1" }, 1, { id: 3 });
+    assert.ok(deletes().some((r) => r.url.startsWith(`https://cloud.example.com/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}?`)));
+    assert.equal(records().length, 0);
+  });
+
+  it("does not delete a share on a server the account was reconnected to", async () => {
+    await startSession();
+    await upload(1, 3);
+    // Disconnect, then Connect the same Thunderbird account to another server.
+    Object.assign(store.accounts.acc1, { baseUrl: "https://other.example.org", appPassword: "new" });
+    requests = [];
+    await listeners.deleted({ id: "acc1" }, 1, { id: 3 });
+    assert.deepEqual(deletes(), [], "share 1 on the new server is someone else's share");
+    assert.equal(records().length, 0, "the record is dropped, not queued for retry");
+  });
+
+  it("does not delete a share after reconnecting as another Nextcloud user", async () => {
+    await startSession();
+    await upload(1, 3);
+    Object.assign(store.accounts.acc1, { userId: "bob", loginName: "bob" });
+    requests = [];
+    await listeners.deleted({ id: "acc1" }, 1, { id: 3 });
+    assert.deepEqual(deletes(), []);
+  });
+
+  it("drops queued cleanups for another server, and ones saved without a server, at startup", async () => {
+    store["pendingDelete:a"] = { accountId: "acc1", server: "https://other.example.org", userId: "alice", shareId: "7", folder: "T/x" };
+    store["pendingDelete:b"] = { accountId: "acc1", shareId: "8", folder: "T/y" }; // saved by an older version
+    await startSession();
+    assert.deepEqual(deletes(), []);
+    assert.equal(Object.keys(store).filter((k) => k.startsWith("pendingDelete:")).length, 0);
   });
 });

@@ -467,6 +467,23 @@ describe("pollLoginFlow", () => {
     assert.equal(calls, 1);
   });
 
+  it("rides out a server or proxy error once the login check has worked", async () => {
+    const statuses = [404, 502, 503, 404];
+    routeFetch(() => {
+      const status = statuses.shift();
+      return status ? [status] : [200, JSON.stringify({ loginName: "alice", appPassword: "secret" })];
+    });
+    const creds = await pollLoginFlow(flow, { intervalMs: 0 });
+    assert.equal(creds.appPassword, "secret");
+  });
+
+  it("fails at once if the server errors on the very first check", async () => {
+    let calls = 0;
+    routeFetch(() => (calls++, [502]));
+    await assert.rejects(pollLoginFlow(flow, { intervalMs: 0, timeoutMs: 60000 }), /HTTP 502/);
+    assert.equal(calls, 1);
+  });
+
   it("still stops when cancelled", async () => {
     const controller = new AbortController();
     routeFetch(() => {

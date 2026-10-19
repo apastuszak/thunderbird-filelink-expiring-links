@@ -79,6 +79,24 @@ async function removeUpload(settings, { shareId, folder }) {
   await deleteFile(settings, folder);
 }
 
+/**
+ * Whether a saved upload or cleanup job was made on the server and user the account is connected
+ * to now. After Disconnect and Connect to another server or user, a saved share ID names a
+ * different, unrelated share there (IDs are sequential), so it must not be deleted. Saves from
+ * before the server was recorded cannot be checked and are skipped: at worst a file is left to expire.
+ */
+const madeHere = (settings, job) => !!job.server && job.server === settings.baseUrl && job.userId === settings.userId;
+
+/** Removes a saved upload if it belongs to the current connection. Returns false if it was skipped. */
+async function removeSavedUpload(settings, job) {
+  if (!madeHere(settings, job)) {
+    console.warn("Skipping cleanup of an upload made on another server or account.");
+    return false;
+  }
+  await removeUpload(settings, job);
+  return true;
+}
+
 function draftFor(accountId, tab) {
   if (tab?.id == null) return null;
   let draft = drafts.get(tab.id);
@@ -213,6 +231,8 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
         shareId: share.id,
         davPath,
         accountId: account.id,
+        server: settings.baseUrl,
+        userId: settings.userId,
         session: SESSION,
         tabId: tab?.id,
         createdAt: Date.now(),
@@ -256,9 +276,15 @@ browser.cloudFile.onFileDeleted.addListener(async (account, fileId, tab) => {
   const key = uploadKey(account.id, fileId);
   const { [key]: info } = await browser.storage.local.get(key);
   if (!info) return;
-  const job = { accountId: account.id, shareId: info.shareId, folder: parentFolder(info.davPath) };
+  const job = {
+    accountId: account.id,
+    server: info.server,
+    userId: info.userId,
+    shareId: info.shareId,
+    folder: parentFolder(info.davPath),
+  };
   try {
-    await removeUpload(await getAccount(account.id), job);
+    await removeSavedUpload(await getAccount(account.id), job);
     await browser.storage.local.remove(key);
   } catch (e) {
     // Keep it under a key that a new upload with a reused fileId cannot overwrite; retried at startup.
@@ -414,7 +440,7 @@ async function retryPendingDeletes() {
   for (const [key, job] of Object.entries(all)) {
     if (!key.startsWith(PENDING_PREFIX)) continue;
     try {
-      await removeUpload(await getAccount(job.accountId), job);
+      await removeSavedUpload(await getAccount(job.accountId), job); // skipped jobs are dropped too
       await browser.storage.local.remove(key);
     } catch {
       // Offline or disconnected: try again next start.

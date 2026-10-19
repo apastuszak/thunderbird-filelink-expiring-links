@@ -78,6 +78,7 @@ Fixed in 0.1.3. Thunderbird does not remember whether an add-on's Filelink accou
 
 - **Removing an attachment from a reopened draft leaves the file on Nextcloud.** After a restart, Thunderbird reports the removal with a new ID and without the link, so the add-on cannot tell which upload it was. The file still expires as set, and its stored password is cleaned up after 90 days.
 - **Mail scanners can use up a one-time link.** Security gateways and link previews fetch links in incoming mail, and that counts as the one download. Combine one-time downloads with a password, which stops a scanner from downloading the file.
+- **Uninstalling does not revoke the app password.** Add-ons are not told when they are removed. Click *Disconnect* in the provider's settings before uninstalling, or delete the app password afterwards under *Settings > Security > Devices & sessions* in Nextcloud.
 - **Expiry is by date only.** Nextcloud's share API accepts a date, not a time; a link works until the end of that day in the time zone set in your Nextcloud account.
 
 ## Status
