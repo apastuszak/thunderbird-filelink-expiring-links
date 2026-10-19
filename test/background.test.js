@@ -211,6 +211,15 @@ describe("expiry at the server's enforced maximum", () => {
     assert.match(result.error ?? "", /Could not reach Nextcloud/);
   });
 
+  it("does not retry after a proxy error, since Nextcloud may already have created the share", async () => {
+    // The proxy timed out waiting; Nextcloud might have finished. A retry could add a second public link.
+    rejectShare = () => new Response("", { status: 499 });
+    await startSession();
+    const result = await upload(1, 3);
+    assert.equal(shareRequests.length, 1);
+    assert.match(result.error ?? "", /HTTP 499/);
+  });
+
   it("does not retry below the maximum", async () => {
     store.accounts.acc1.expiryDays = 3;
     rejectShare = () => ocsError("Some other problem");

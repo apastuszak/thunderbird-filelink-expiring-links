@@ -134,6 +134,13 @@ describe("randomPassword", () => {
 });
 
 describe("OCS error handling", () => {
+  it("marks only Nextcloud's own refusals with ocsStatus, not bare proxy statuses", async () => {
+    mockFetch(404, { ocs: { meta: { statuscode: 404, message: "Cannot set expiration date" }, data: [] } });
+    await assert.rejects(createPublicShare(account, { path: "/a" }), (e) => e.ocsStatus === 404);
+    mockFetch(502, "<html>Bad Gateway</html>");
+    await assert.rejects(createPublicShare(account, { path: "/a" }), (e) => e.ocsStatus === undefined && /HTTP 502/.test(e.message));
+  });
+
   it("returns share fields on success", async () => {
     const calls = mockFetch(200, {
       ocs: { meta: { statuscode: 200 }, data: { id: "42", token: "abc", url: "https://x/s/abc", expiration: "2026-10-25 00:00:00" } },
@@ -448,6 +455,16 @@ describe("pollLoginFlow", () => {
     const creds = await pollLoginFlow(flow, { intervalMs: 0 });
     assert.equal(creds.appPassword, "secret");
     assert.equal(calls, 3);
+  });
+
+  it("fails at once if the very first check cannot get through (unreachable or redirecting)", async () => {
+    let calls = 0;
+    routeFetch(() => {
+      calls++;
+      throw new TypeError("NetworkError when attempting to fetch resource.");
+    });
+    await assert.rejects(pollLoginFlow(flow, { intervalMs: 0, timeoutMs: 60000 }), /Could not check the login with cloud\.example\.com.*redirecting/);
+    assert.equal(calls, 1);
   });
 
   it("still stops when cancelled", async () => {
