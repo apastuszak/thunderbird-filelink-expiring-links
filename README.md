@@ -18,6 +18,61 @@ Thunderbird Filelink provider for Nextcloud with expiring links, optional genera
 - Requests that carry the app password never follow redirects, and share links are only put into an email if they use https.
 - The `compose` permission is used only to add the password to messages that contain this add-on's password-protected links.
 
+## Troubleshooting
+
+### Uploads fail with HTTP 499 (Nextcloud AIO with ClamAV)
+
+HTTP 499 is not sent by Nextcloud itself. It means a reverse proxy gave up on the request: either your own (for example Caddy in front of AIO) or AIO's internal Caddy inside the `nextcloud-aio-apache` container.
+
+If ClamAV is enabled in AIO, Nextcloud's antivirus app (`files_antivirus`) scans each upload while it is being received. ClamAV unpacks compressed files to scan their contents, so a file that expands to something very large can take too long and the request is dropped. In testing:
+
+- a 16 MB zip that unpacks to about 16 GB failed with 499, while 16 MB of random data uploaded fine;
+- a 90 MB `.dmg` (also compressed) failed with 499;
+- both worked after ClamAV was turned off.
+
+Ordinary attachments are not affected. To fix it, either:
+
+- **Turn ClamAV off:** in the AIO interface click *Stop containers*, untick *ClamAV* under *Optional containers*, *Save changes*, then *Start containers*. AIO then also removes the `files_antivirus` app (with the default `REMOVE_DISABLED_APPS=yes`). Note that AIO configures ClamAV with `av_infected_action = only_log`: infected files are only logged, not blocked or deleted, so turning it off gives up less than you might expect.
+- **Or skip scanning the upload folder (untested):** `files_antivirus` skips any file with a folder of exactly that name in its path. AIO's `CLAMAV_BLOCKLISTED_DIRECTORIES` variable is not passed through by the mastercontainer, so set it directly:
+
+  ```bash
+  docker exec --user www-data nextcloud-aio-nextcloud php occ config:app:set files_antivirus \
+    av_blocklisted_directories --type=array --value='["Thunderbird attachments"]'
+  ```
+
+  This applies to every user's folder of that name, and to the folder set in the add-on's settings only if you keep the default name.
+
+### Every request returns 499 until Caddy is restarted
+
+After a failed upload, the outer Caddy (in front of AIO) kept answering every request, even `status.php`, with an instant 499, while AIO itself answered normally. Restarting Caddy fixed it. To see which layer is failing, run these on the server:
+
+```bash
+# Through your Caddy
+curl -sS -m 20 -o /dev/null -w '%{http_code}\n' https://cloud.example.com/status.php
+# Straight to AIO's internal Caddy (APACHE_PORT, 11000 by default)
+curl -sS -m 20 -o /dev/null -w '%{http_code}\n' -H 'Host: cloud.example.com' http://127.0.0.1:11000/status.php
+# Straight to Apache inside the AIO container
+docker exec nextcloud-aio-apache sh -c 'printf "GET /status.php HTTP/1.0\r\nHost: cloud.example.com\r\n\r\n" | nc -w 10 127.0.0.1 8000 | head -1'
+```
+
+If only the first fails, restart your Caddy (`sudo systemctl restart caddy`, or restart its container). A possible safeguard, not yet confirmed to help, is to stop Caddy reusing connections to AIO:
+
+```
+cloud.example.com {
+	reverse_proxy 127.0.0.1:11000 {
+		transport http {
+			keepalive off
+		}
+	}
+}
+```
+
+Caddy logs nothing for these 499s by default; add a `log` block to the site to get an access log of each request with its status and duration.
+
+### The provider shows a yellow warning triangle after restarting Thunderbird
+
+Fixed in 0.1.3. Thunderbird does not remember whether an add-on's Filelink account is set up, and older versions did not restore it on startup. Update the add-on; removing and re-adding the provider is no longer needed (and each time created a new app password, which you can delete under *Settings > Security > Devices & sessions* in Nextcloud).
+
 ## Status
 
 Requires Thunderbird 128 or newer. Tested with Thunderbird 158 and Nextcloud AIO behind a Caddy reverse proxy. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing, and the Nextcloud logo used as the icon is a Nextcloud GmbH trademark. See `CLAUDE.md` for open items.
