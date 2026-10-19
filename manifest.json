@@ -1,17 +1,17 @@
 {
   "manifest_version": 2,
-  "name": "Nextcloud Expiring Links",
-  "short_name": "NC Links",
-  "description": "Filelink provider for Nextcloud with expiring and one-time download links.",
-  "version": "0.1.11",
+  "name": "Expiring Links for Self-Hosted Cloud Storage",
+  "short_name": "Expiring Links",
+  "description": "Filelink provider with expiring, password-protected and one-time download links. Works with Nextcloud.",
+  "version": "0.1.12",
   "author": "Andy Pastuszak",
   "homepage_url": "https://github.com/apastuszak/thunderbird-filelink-expiring-links",
   "icons": {
-    "16": "icons/nextcloud.svg",
-    "32": "icons/nextcloud.svg",
-    "48": "icons/nextcloud.svg",
-    "64": "icons/nextcloud.svg",
-    "128": "icons/nextcloud.svg"
+    "16": "icons/icon.svg",
+    "32": "icons/icon.svg",
+    "48": "icons/icon.svg",
+    "64": "icons/icon.svg",
+    "128": "icons/icon.svg"
   },
   "browser_specific_settings": {
     "gecko": {
@@ -24,7 +24,7 @@
     "type": "module"
   },
   "cloud_file": {
-    "name": "Nextcloud (expiring links)",
+    "name": "Expiring Links",
     "management_url": "/options/options.html",
     "reuse_uploads": false
   },

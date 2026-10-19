@@ -1,11 +1,11 @@
-# Nextcloud Expiring Links
+# Expiring Links for Self-Hosted Cloud Storage
 
-Thunderbird Filelink provider for Nextcloud with expiring links, optional generated passwords and an optional one-time download limit.
+Thunderbird Filelink provider with expiring links, optional generated passwords and an optional one-time download limit. **Works with Nextcloud.**
 
 ## Try it
 
 1. Thunderbird 128 or newer: Tools > Developer Tools > Debug Add-ons > Load Temporary Add-on, and pick `manifest.json`.
-2. Settings > Composition > Attachments > Add Filelink Provider > "Nextcloud (expiring links)".
+2. Settings > Composition > Attachments > Add Filelink Provider > "Expiring Links".
 3. Enter your Nextcloud URL and click Connect; finish the login in your browser.
 4. Attach a file in the composer and choose to link it with this provider.
 
@@ -83,7 +83,7 @@ Fixed in 0.1.3. Thunderbird does not remember whether an add-on's Filelink accou
 
 ## Status
 
-Requires Thunderbird 128 or newer. Tested with Thunderbird 158 and Nextcloud AIO behind a Caddy reverse proxy. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing, and the Nextcloud logo used as the icon is a Nextcloud GmbH trademark. See `CLAUDE.md` for open items.
+Requires Thunderbird 128 or newer. Tested with Thunderbird 158 and Nextcloud AIO behind a Caddy reverse proxy. One-time downloads need Nextcloud's Download Limit app; without it the option is disabled. Not yet listed on addons.thunderbird.net: localisation is missing. See `CLAUDE.md` for open items.
 
 ## License
 
@@ -91,4 +91,4 @@ Copyright (C) 2026 Andy Pastuszak
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
 
-The icon (`icons/nextcloud.svg`) is the Nextcloud logo, a trademark of Nextcloud GmbH, and is not covered by this license; its use is subject to [Nextcloud's trademark guidelines](https://nextcloud.com/trademarks/).
+This project is not affiliated with or endorsed by Nextcloud GmbH. Nextcloud is a trademark of Nextcloud GmbH; it is used here only to say which server software the add-on works with.
