@@ -13,7 +13,8 @@ Thunderbird Filelink provider for Nextcloud with expiring links, optional genera
 
 - The server must be reachable over HTTPS with a valid certificate (plain HTTP only for `localhost`).
 - Only a Nextcloud app password is stored, in the Thunderbird profile (`browser.storage.local`), unencrypted. Thunderbird gives add-ons no encrypted storage. Disconnecting or removing the account revokes the app password on the server.
-- Generated link passwords are copied to the clipboard. Send them to the recipient separately, not in the same email.
+- Generated link passwords are copied to the clipboard, and a window asks how to deliver them: a separate email to the same recipients (opened as a draft for you to send), in the same email below the link, or by yourself. A separate email or another channel (text message, chat) keeps the password away from anyone who only sees the first email.
+- The `compose` permission is used only to add the password to messages that contain this add-on's password-protected links.
 
 ## Status
 

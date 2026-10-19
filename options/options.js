@@ -15,7 +15,13 @@ import {
 
 const accountId = new URLSearchParams(location.search).get("accountId");
 const $ = (id) => document.getElementById(id);
-const DEFAULTS = { folder: "Thunderbird attachments", expiryDays: 7, oneTime: false, generatePassword: false };
+const DEFAULTS = {
+  folder: "Thunderbird attachments",
+  expiryDays: 7,
+  oneTime: false,
+  generatePassword: false,
+  passwordDelivery: "ask",
+};
 
 function setStatus(text, isError = false) {
   $("status").textContent = text;
@@ -60,6 +66,7 @@ async function render() {
   $("password").checked = a.generatePassword || passwordEnforced;
   $("password").disabled = passwordEnforced;
   $("onetime").checked = a.oneTime;
+  $("delivery").value = a.passwordDelivery;
   const connected = !!a.appPassword;
   $("connected").hidden = !connected;
   $("who").textContent = connected ? `${a.displayName || a.userId} @ ${a.baseUrl}` : "";
@@ -144,6 +151,7 @@ async function saveSettings({ tidy = false } = {}) {
     expiryDays,
     generatePassword: $("password").checked || !!a.policy?.passwordEnforced,
     oneTime: $("onetime").checked,
+    passwordDelivery: $("delivery").value,
   });
   if (tidy) {
     $("folder").value = folder;
@@ -154,7 +162,7 @@ async function saveSettings({ tidy = false } = {}) {
   savedTimer = setTimeout(() => ($("saved").textContent = ""), 4000);
 }
 
-for (const id of ["password", "onetime"]) $(id).addEventListener("change", () => saveSettings());
+for (const id of ["password", "onetime", "delivery"]) $(id).addEventListener("change", () => saveSettings());
 for (const id of ["folder", "expiry"]) {
   // Also save while typing, so closing the settings tab without leaving the field keeps the value.
   $(id).addEventListener("input", () => {
