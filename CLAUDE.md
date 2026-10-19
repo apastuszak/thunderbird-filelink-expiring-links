@@ -29,6 +29,9 @@ Thunderbird (MailExtension, Manifest V2) Filelink provider for Nextcloud. Upload
 
 - Plain ES modules, no bundler, no runtime dependencies. Dev tooling only: `web-ext`.
 - Use the `browser.*` namespace. Everything is promise-based.
+- Host permissions use `originPattern()`, which drops the port: Firefox/Thunderbird match patterns do not support ports and cover all ports of a host.
+- Share links are checked with `checkShareUrl()` before going into an email: https only (another public domain is fine), plain http only for a local server's own links.
+- WebDAV errors pass on Nextcloud's `<s:message>` text via `davFailure()`.
 - Requests carrying the app password go through `authFetch()` in `lib/nextcloud.js`, which refuses redirects so the `Authorization` header cannot follow one.
 - Server settings (`policy`, `chunkSize`, `downloadLimit`) come from `serverInfo(capabilities)`; saved at Connect, refreshed on every start.
 - Wrap Nextcloud failures in `Error` with a message a human can act on; `onFileUpload` returns `{ error }` rather than throwing.

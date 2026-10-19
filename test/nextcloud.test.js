@@ -5,7 +5,9 @@ import {
   clampExpiryDays,
   createPublicShare,
   deleteFile,
+  checkShareUrl,
   MAX_CHUNK_SIZE,
+  originPattern,
   serverInfo,
   localDateFromNow,
   normalizeBaseUrl,
@@ -292,7 +294,7 @@ describe("requests with the app password", () => {
   it("refuse redirects so the Authorization header cannot follow one", async () => {
     const calls = routeFetch(() => [204]);
     await deleteFile(account, "f/x");
-    mockFetch(200, { ocs: { meta: { statuscode: 200 }, data: { id: "1", token: "t", url: "u" } } });
+    mockFetch(200, { ocs: { meta: { statuscode: 200 }, data: { id: "1", token: "t", url: "https://cloud.example.com/s/t" } } });
     const ocsCalls = [];
     const inner = globalThis.fetch;
     globalThis.fetch = (url, init) => (ocsCalls.push(init), inner(url, init));
@@ -334,5 +336,57 @@ describe("finishing a chunked upload", () => {
     await assert.rejects(uploadFile(account, "f/big.bin", blob, { chunkSize: 10, ...fast }), /Finishing the upload failed \(HTTP 403\)/);
     assert.equal(calls.filter((c) => c.method === "MOVE").length, 1);
     assert.equal(calls.at(-1).method, "DELETE");
+  });
+});
+
+describe("originPattern", () => {
+  it("leaves out the port, which Firefox match patterns do not support", () => {
+    assert.equal(originPattern("https://cloud.example.com:8443/nextcloud"), "https://cloud.example.com/*");
+    assert.equal(originPattern("https://cloud.example.com"), "https://cloud.example.com/*");
+    assert.equal(originPattern("http://localhost:8080"), "http://localhost/*");
+  });
+});
+
+describe("checkShareUrl", () => {
+  it("accepts https links, also on another public domain", () => {
+    checkShareUrl("https://cloud.example.com/s/abc", "https://cloud.example.com");
+    checkShareUrl("https://files.example.org/s/abc", "https://cloud.example.com");
+  });
+
+  it("rejects http links and names the setting to fix", () => {
+    assert.throws(
+      () => checkShareUrl("http://nextcloud-aio-apache:11000/s/abc", "https://cloud.example.com"),
+      /http:\/\/nextcloud-aio-apache:11000, which is not https.*overwriteprotocol/,
+    );
+    assert.throws(() => checkShareUrl("javascript:alert(1)", "https://cloud.example.com"), /not https/);
+    assert.throws(() => checkShareUrl(undefined, "https://cloud.example.com"), /invalid share link/);
+  });
+
+  it("allows http only for a local server's own links", () => {
+    checkShareUrl("http://localhost:8080/s/abc", "http://localhost:8080");
+    assert.throws(() => checkShareUrl("http://other.example/s/abc", "http://localhost:8080"), /not https/);
+  });
+
+  it("is applied to newly created shares", async () => {
+    mockFetch(200, { ocs: { meta: { statuscode: 200 }, data: { id: "7", token: "t", url: "http://cloud.example.com/s/t" } } });
+    await assert.rejects(createPublicShare(account, { path: "/a" }), /not https/);
+  });
+});
+
+describe("WebDAV error messages", () => {
+  it("passes on Nextcloud's explanation", async () => {
+    routeFetch(() => [
+      400,
+      '<?xml version="1.0"?><d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns"><s:exception>Sabre\\DAV\\Exception\\BadRequest</s:exception><s:message>File name contains at least one invalid character &quot;\\&quot;</s:message></d:error>',
+    ]);
+    await assert.rejects(
+      uploadFile(account, "f/a.txt", new Blob(["x"])),
+      { message: 'Upload failed: File name contains at least one invalid character "\\" (HTTP 400).' },
+    );
+  });
+
+  it("falls back to the status without a message", async () => {
+    routeFetch(() => [400, "<html>Bad Request</html>"]);
+    await assert.rejects(uploadFile(account, "f/a.txt", new Blob(["x"])), { message: "Upload failed (HTTP 400)." });
   });
 });
