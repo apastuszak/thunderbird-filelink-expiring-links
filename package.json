@@ -12,6 +12,6 @@
   "scripts": {
     "lint": "npx --yes web-ext lint --source-dir . --ignore-files 'node_modules/**' 'test/**' '*.xpi'",
     "test": "node --test",
-    "build": "npx --yes web-ext build --source-dir . --artifacts-dir dist --ignore-files CLAUDE.md README.md package.json 'dist/**' 'node_modules/**' 'test' 'test/**'"
+    "build": "npx --yes web-ext build --source-dir . --artifacts-dir dist --ignore-files AGENTS.md CLAUDE.md README.md package.json 'dist/**' 'node_modules/**' 'test' 'test/**'"
   }
 }
