@@ -13,6 +13,7 @@ import {
   revokeAppPassword,
   serverInfo,
   setDownloadLimit,
+  SHARE_LABEL,
   uploadFile,
 } from "./lib/nextcloud.js";
 import {
@@ -221,7 +222,7 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
         path: "/" + davPath,
         password,
         expireDate: days > 0 ? localDateFromNow(days) : undefined,
-        label: "Thunderbird",
+        label: SHARE_LABEL,
         signal: controller.signal,
       });
     try {

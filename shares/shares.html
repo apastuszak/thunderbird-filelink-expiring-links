@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared files – Expiring Links</title>
+  <link rel="stylesheet" href="shares.css">
+</head>
+<body>
+  <header>
+    <h1>Shared files</h1>
+    <p id="who" class="hint"></p>
+  </header>
+
+  <p class="hint">
+    Links this add-on has created on your server, newest first. <strong>Revoke link</strong> stops
+    anyone from downloading the file through it, and keeps the file on your server.
+    <strong>Delete file</strong> removes the file and its link; with Nextcloud's trash bin (on by
+    default) it goes to Deleted files. Copies already downloaded are not affected either way.
+  </p>
+
+  <div class="toolbar">
+    <button id="refresh-btn" type="button">Refresh</button>
+    <span id="status" role="status"></span>
+  </div>
+
+  <table id="shares" hidden>
+    <thead>
+      <tr>
+        <th scope="col">File</th>
+        <th scope="col">Shared</th>
+        <th scope="col">Expires</th>
+        <th scope="col">Password</th>
+        <th scope="col"><span class="visually-hidden">Actions</span></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <template id="row">
+    <tr>
+      <td><span class="name"></span><br><span class="folder hint"></span></td>
+      <td class="shared"></td>
+      <td class="expires"></td>
+      <td class="password"></td>
+      <td class="actions">
+        <button class="copy-btn" type="button">Copy link</button>
+        <button class="revoke-btn danger" type="button">Revoke link</button>
+        <button class="delete-btn danger" type="button">Delete file</button>
+        <span class="result" role="status"></span>
+      </td>
+    </tr>
+  </template>
+
+  <script type="module" src="shares.js"></script>
+</body>
+</html>

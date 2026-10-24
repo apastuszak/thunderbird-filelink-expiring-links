@@ -86,6 +86,7 @@ async function render() {
   renderChoices(a);
   const connected = !!a.appPassword;
   $("connected").hidden = !connected;
+  $("shares-row").hidden = !connected;
   $("who").textContent = connected ? `${a.displayName || a.userId} @ ${a.baseUrl}` : "";
   $("connect-btn").hidden = connected;
   $("url").disabled = connected;
@@ -148,6 +149,10 @@ $("connect-btn").addEventListener("click", async () => {
   } finally {
     $("connect-btn").disabled = false;
   }
+});
+
+$("shares-btn").addEventListener("click", () => {
+  browser.tabs.create({ url: `/shares/shares.html?accountId=${encodeURIComponent(accountId)}` });
 });
 
 $("disconnect-btn").addEventListener("click", async () => {

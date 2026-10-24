@@ -13,6 +13,12 @@ See the [feature roadmap](ROADMAP.md) for proposed improvements and priorities.
 3. Enter your Nextcloud URL and click Connect; finish the login in your browser.
 4. Attach a file in the composer and choose to link it with this provider.
 
+## Shared files and revoking links
+
+Sent the wrong file, or to the wrong people? Open the provider's settings (Settings > Composition > Attachments, select "Expiring Links") and click **Shared files…**. The page lists the links this add-on has created on your server, newest first, with their expiry date and whether they have a password. **Revoke link** stops anyone from downloading the file through that link and keeps the file on your server. **Delete file** removes the file and its link; with Nextcloud's trash bin (on by default) the file goes to Deleted files, where it can still be restored for a while. Its upload folder is removed too, but only if nothing else is in it. Copies already downloaded cannot be recalled either way.
+
+The list comes straight from your server, so it also reflects links you changed or removed in Nextcloud. Links you shared by hand in Nextcloud are not shown.
+
 ## Security notes
 
 - The server must be reachable over HTTPS with a valid certificate (plain HTTP only for `localhost`).

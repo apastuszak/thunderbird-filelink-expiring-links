@@ -9,6 +9,11 @@ import {
   MAX_CHUNK_SIZE,
   originPattern,
   pollLoginFlow,
+  addOnShares,
+  deleteUploadedFile,
+  listShares,
+  revokeShare,
+  SHARE_LABEL,
   serverInfo,
   localDateFromNow,
   normalizeBaseUrl,
@@ -497,5 +502,127 @@ describe("pollLoginFlow", () => {
     const calls = routeFetch(() => [200, JSON.stringify({ loginName: "a", appPassword: "p" })]);
     await pollLoginFlow(flow, { intervalMs: 0 });
     assert.equal(calls[0].init.redirect, "error");
+  });
+});
+
+describe("shared-files page", () => {
+  const share = (over) => ({
+    id: 7,
+    share_type: 3,
+    label: SHARE_LABEL,
+    item_type: "file",
+    path: "/Thunderbird attachments/0123456789abcdef/report.pdf",
+    url: "https://cloud.example.com/s/AbC123",
+    stime: 1760000000,
+    expiration: "2026-10-25 00:00:00",
+    password: "redacted",
+    ...over,
+  });
+
+  it("lists the user's own shares from the OCS API", async () => {
+    const calls = mockFetch(200, { ocs: { meta: { statuscode: 200 }, data: [share()] } });
+    const shares = await listShares(account);
+    assert.equal(shares.length, 1);
+    assert.match(calls[0].url, /\/ocs\/v2\.php\/apps\/files_sharing\/api\/v1\/shares\?format=json$/);
+    assert.equal(calls[0].init.method, "GET");
+    assert.equal(calls[0].init.redirect, "error");
+  });
+
+  it("keeps only this add-on's file link shares, newest first", () => {
+    const shares = addOnShares([
+      share({ id: 1, stime: 100 }),
+      share({ id: 2, stime: 300, path: "/Old folder/fedcba9876543210/b.zip", password: null }), // folder changed since
+      share({ id: 3, share_type: 0 }), // shared with a user, not a public link
+      share({ id: 4, label: "" }), // shared by hand in Nextcloud
+      share({ id: 5, item_type: "folder", path: "/Thunderbird attachments/0123456789abcdef" }),
+      share({ id: 6, path: "/Thunderbird attachments/report.pdf" }), // not in a per-upload folder
+      share({ id: 8, path: "/Thunderbird attachments/not-a-random-id/report.pdf" }),
+    ]);
+    assert.deepEqual(shares.map((s) => s.id), ["2", "1"]);
+    assert.deepEqual(
+      { ...shares[1], expiresAt: undefined },
+      {
+        id: "1",
+        name: "report.pdf",
+        path: "/Thunderbird attachments/0123456789abcdef/report.pdf",
+        folder: "Thunderbird attachments",
+        url: "https://cloud.example.com/s/AbC123",
+        sharedAt: 100000,
+        expiresAt: undefined,
+        hasPassword: true,
+      },
+    );
+    assert.equal(new Date(shares[1].expiresAt).getDate(), 25);
+    assert.equal(shares[0].folder, "Old folder");
+    assert.equal(shares[0].hasPassword, false);
+    assert.equal(addOnShares([share({ expiration: null })])[0].expiresAt, null);
+  });
+
+  it("revokes a link with DELETE on the share", async () => {
+    const calls = mockFetch(200, { ocs: { meta: { statuscode: 200 }, data: [] } });
+    assert.equal(await revokeShare(account, "7"), "revoked");
+    assert.equal(calls[0].init.method, "DELETE");
+    assert.match(calls[0].url, /\/shares\/7\?format=json$/);
+  });
+
+  it("reports a share that no longer exists as gone, and other failures as errors", async () => {
+    mockFetch(404, { ocs: { meta: { statuscode: 404, message: "Wrong share ID, share does not exist" }, data: [] } });
+    assert.equal(await revokeShare(account, "7"), "gone");
+    mockFetch(403, { ocs: { meta: { statuscode: 403, message: "Not allowed" }, data: [] } });
+    await assert.rejects(revokeShare(account, "7"), /Not allowed/);
+    mockFetch(502, "<html>Bad Gateway</html>"); // a proxy error is not proof the share is gone
+    await assert.rejects(revokeShare(account, "7"), /HTTP 502/);
+  });
+});
+
+describe("deleting an uploaded file", () => {
+  const path = "/Thunderbird attachments/0123456789abcdef/report #1.pdf";
+  const base = "https://cloud.example.com/remote.php/dav/files/alice";
+  const multistatus = (n) =>
+    `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">${"<d:response><d:href>x</d:href></d:response>".repeat(n)}</d:multistatus>`;
+
+  it("deletes the file, then its per-upload folder once empty", async () => {
+    const calls = routeFetch((method) => (method === "PROPFIND" ? [207, multistatus(1)] : [204]));
+    assert.equal(await deleteUploadedFile(account, path), "deleted");
+    assert.deepEqual(
+      calls.map((c) => [c.method, c.url]),
+      [
+        ["DELETE", `${base}/Thunderbird%20attachments/0123456789abcdef/report%20%231.pdf`],
+        ["PROPFIND", `${base}/Thunderbird%20attachments/0123456789abcdef`],
+        ["DELETE", `${base}/Thunderbird%20attachments/0123456789abcdef`],
+      ],
+    );
+    assert.equal(calls[1].init.headers.Depth, "1");
+    for (const c of calls) assert.equal(c.init.redirect, "error");
+  });
+
+  it("keeps the folder if something else is in it", async () => {
+    const calls = routeFetch((method) => (method === "PROPFIND" ? [207, multistatus(2)] : [204]));
+    assert.equal(await deleteUploadedFile(account, path), "deleted");
+    assert.deepEqual(calls.map((c) => c.method), ["DELETE", "PROPFIND"]);
+  });
+
+  it("reports a file that no longer exists as gone", async () => {
+    routeFetch((method) => (method === "PROPFIND" ? [404] : [404]));
+    assert.equal(await deleteUploadedFile(account, path), "gone");
+  });
+
+  it("passes on a refusal and leaves the folder alone", async () => {
+    const calls = routeFetch(() => [403, '<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns"><s:message>File is locked</s:message></d:error>']);
+    await assert.rejects(deleteUploadedFile(account, path), { message: "Deleting the file failed: File is locked (HTTP 403)." });
+    assert.equal(calls.length, 1);
+  });
+
+  it("still reports the file as deleted if tidying the folder fails", async () => {
+    routeFetch((method) => (method === "PROPFIND" ? [500] : [204]));
+    assert.equal(await deleteUploadedFile(account, path), "deleted");
+  });
+
+  it("refuses anything outside a per-upload folder", async () => {
+    const calls = routeFetch(() => [204]);
+    for (const bad of ["/Documents/taxes.pdf", "/Thunderbird attachments/report.pdf", "/Thunderbird attachments/0123456789abcdef", undefined]) {
+      await assert.rejects(deleteUploadedFile(account, bad), /not uploaded by this add-on/);
+    }
+    assert.equal(calls.length, 0);
   });
 });

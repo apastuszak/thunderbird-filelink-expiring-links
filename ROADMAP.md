@@ -19,12 +19,14 @@ Before listing:
 
 | Order | Feature | Intended benefit |
 | --- | --- | --- |
-| 1 | Shared-files page: link revocation and pending actions | Let users correct mistakes after sending, and resolve pending work after notifications disappear. |
+| 1 | Shared-files page: link revocation (done in 0.3.0) and pending actions | Let users correct mistakes after sending, and resolve pending work after notifications disappear. |
 | 2 | Optional cleanup of old uploads | Prevent expired shares from leaving files indefinitely. |
 | 3 | Sharing panel in the compose window: summary, then per-message choices | Make protection clear before sending, and adapt it to individual messages. |
 | 4 | Large-upload status view | Explain long-running uploads and server processing. |
 
 ## 1. Shared-files page: link revocation and pending actions
+
+**Status:** The shared-files list with **Revoke link** is implemented (0.3.0): opened from the provider's settings page, built from the server's share list, no local records. **Delete file** is implemented too (the file goes to Nextcloud's trash bin when enabled; the per-upload folder is removed only if empty). Not yet done: the Pending section, showing which email a share was sent with, and paging for very large share lists.
 
 **Scope:** One page that lists recently shared files with a **Revoke link** control, so users can withdraw access after sending the wrong file or choosing the wrong recipients. A **Pending** section on the same page shows password emails waiting to open and server cleanups waiting to retry, with Retry now, Open password email, and Discard controls appropriate to each. Pending work is rare by design, so it does not warrant a page of its own.
 

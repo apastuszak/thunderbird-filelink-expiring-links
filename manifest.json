@@ -3,7 +3,7 @@
   "name": "Expiring Links for Self-Hosted Cloud Storage",
   "short_name": "Expiring Links",
   "description": "Filelink provider with expiring, password-protected and one-time download links. Works with Nextcloud; tested on Nextcloud 35.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Andy Pastuszak",
   "homepage_url": "https://github.com/apastuszak/thunderbird-filelink-expiring-links",
   "icons": {

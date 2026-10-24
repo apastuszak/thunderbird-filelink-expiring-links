@@ -24,6 +24,7 @@ Instructions for AI coding agents and contributors working on this repository. (
 - `lib/message.js`: adds link passwords to an outgoing message and finds the add-on's links in it (outside quoted text). No Thunderbird APIs.
 - `password/`: popup that shows a generated link password and asks how to deliver it.
 - `options/`: settings page shown in the account settings. Thunderbird appends `?accountId=<id>` to `management_url`.
+- `shares/`: shared-files page (opened from the settings page, `?accountId=<id>`). Lists the add-on's link shares from the server (`listShares` + `addOnShares`: link shares labelled `SHARE_LABEL` on a file in a `<folder>/<16 hex>/` upload folder; Nextcloud's folder filter is shallow, so matching happens client-side) revokes them (`revokeShare`, a share `DELETE`; a 404 means already gone; the file stays), and deletes files (`deleteUploadedFile`: WebDAV `DELETE` of the file, which removes its shares, then its per-upload folder only if a `PROPFIND` shows it empty; refuses any path outside `<folder>/<16 hex>/`). Keeps no local records.
 - `icons/icon.svg`: the add-on's original icon.
 - `test/`: Node tests (`npm test`, no dependencies); see "Tests" below.
 - Storage (`browser.storage.local`):

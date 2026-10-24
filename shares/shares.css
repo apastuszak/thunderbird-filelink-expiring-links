@@ -1,0 +1,20 @@
+:root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+body { margin: 0; padding: 16px 24px; max-width: 980px; }
+h1 { font-size: 1.3em; margin: 0 0 .2em; }
+.hint { color: GrayText; margin: .3em 0; }
+.toolbar { display: flex; gap: 12px; align-items: center; margin: 1em 0; }
+#status { color: GrayText; }
+#status.error { color: #c0392b; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid color-mix(in srgb, GrayText 35%, transparent); vertical-align: top; }
+th { font-weight: 600; }
+.name { font-weight: 600; overflow-wrap: anywhere; }
+.folder { font-size: .9em; }
+.actions { white-space: nowrap; }
+.actions button + button { margin-left: 6px; }
+.actions .result { display: block; margin-top: 4px; white-space: normal; }
+.expired { color: GrayText; }
+tr.revoked td:not(.actions) { opacity: .55; text-decoration: line-through; }
+button { padding: 5px 12px; cursor: pointer; }
+button.danger { color: #c0392b; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
