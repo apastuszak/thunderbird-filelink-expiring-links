@@ -30,7 +30,9 @@ Before listing:
 
 **Design constraints (shared files):**
 
-- Prefer Nextcloud as the source of truth: the share API can list the user's shares (path, expiry, label), and every share this add-on creates is labelled "Thunderbird" in a known upload folder. Verify this listing against a real Nextcloud instance first. Building the list from the server keeps local storage minimal, works across computers and reinstalls, and reflects changes made in Nextcloud.
+- Prefer Nextcloud as the source of truth: `GET /ocs/v2.php/apps/files_sharing/api/v1/shares` lists the user's own shares with id, URL, path, expiry and label (`ShareAPIController::formatShare`), and every share this add-on creates is labelled "Thunderbird" in a known upload folder. Verify this listing against a real Nextcloud instance first. Building the list from the server keeps local storage minimal, works across computers and reinstalls, and reflects changes made in Nextcloud.
+- Filter by folder in the add-on, not on the server. The API's folder filter (`path` with `subfiles=true`) is shallow: it lists only shares on items directly inside that folder (`getSharesInDir` uses `getDirectoryListing()`, and `Share20\Manager::getSharesInFolder` rejects non-shallow requests). Uploads live one level deeper (`<upload folder>/<random>/<file>`), so fetch the user's shares and match by path prefix and the "Thunderbird" label. Matching the label as well covers uploads from before the upload folder was changed. Add paging if a user has thousands of shares.
+- Revoking uses `DELETE …/shares/<id>`, which the add-on already calls when an attachment is removed. No new permissions are needed.
 - The server does not know which email a share was sent with. If that context is needed, keep only a separate, minimal local record for it; never retain passwords or make sent links eligible for draft-password recovery. Document what is kept and for how long.
 - Distinguish revoking a public link from deleting the uploaded file.
 - Explain that revocation cannot recall copies already downloaded.
