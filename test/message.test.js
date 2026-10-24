@@ -1,10 +1,26 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { addPasswordToPlainText, findLinksInPlainText, passwordMessage } from "../lib/message.js";
+import { addPasswordToPlainText, findLinksInHtml, findLinksInPlainText, passwordMessage } from "../lib/message.js";
 
 const url = "https://cloud.example.com/s/AbC123";
 const other = "https://cloud.example.com/s/XyZ789";
 const link = (u, password, name = "report.pdf") => ({ url: u, name, password });
+
+describe("findLinksInHtml", () => {
+  it("excludes forwarded and quoted Filelinks while retaining a new link outside them", () => {
+    // Minimal DOM interface for Node; closest() models the ancestors of each Filelink.
+    const item = (value, ancestors) => ({
+      getAttribute: () => value,
+      closest: (selector) => selector.split(",").some((part) => ancestors.includes(part.trim())) ? {} : null,
+    });
+    const doc = { querySelectorAll: () => [
+      item(url, [".moz-forward-container"]),
+      item(url, ['blockquote[type="cite"]']),
+      item(other, []),
+    ] };
+    assert.deepEqual(findLinksInHtml(doc, [url, other]), [other]);
+  });
+});
 
 describe("addPasswordToPlainText", () => {
   it("adds the password under the line with the link", () => {
@@ -51,15 +67,15 @@ describe("findLinksInPlainText", () => {
 });
 
 describe("passwordMessage", () => {
-  it("addresses the same people from the same identity with only the password", () => {
+  it("addresses the same people from the original identity with only the password", () => {
     const details = passwordMessage(
-      { to: ["a@example.com"], cc: ["b@example.com"], bcc: [], subject: "Q3 report", identityId: "id1" },
+      { to: ["a@example.com"], cc: ["b@example.com"], bcc: [], subject: "Q3 report", identityId: "id-secondary" },
       [link(url, "s3cret")],
     );
     assert.deepEqual(
       { ...details, plainTextBody: undefined },
       {
-        identityId: "id1",
+        identityId: "id-secondary",
         to: ["a@example.com"],
         cc: ["b@example.com"],
         bcc: [],

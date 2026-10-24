@@ -2,6 +2,10 @@
 // copy of the script, as a Thunderbird restart would, while storage persists across them.
 // Messages are plain text, so no HTML parser is needed.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+let identities;
 import { beforeEach, describe, it } from "node:test";
 import { localDateFromNow } from "../lib/nextcloud.js";
 
@@ -45,11 +49,24 @@ function installBrowser() {
     compose: {
       onBeforeSend: on("beforeSend"),
       onAfterSend: on("afterSend"),
-      beginNew: async (details) => void log.push(["beginNew", details]),
+      beginNew: async (details) => {
+        if (details.identityId != null) {
+          if (!manifest.permissions.includes("accountsRead")) throw new Error('Using identities requires the "accountsRead" permission');
+          if (!identities.has(details.identityId)) throw new Error(`Identity not found: ${details.identityId}`);
+        }
+        log.push(["beginNew", details]);
+      },
     },
     tabs: { onRemoved: on("tabRemoved") },
     runtime: { onMessage: on("message") },
-    notifications: { create: (n) => void log.push(["notify", n.message]) },
+    notifications: {
+      create: async (id, options) => {
+        const n = options || id;
+        log.push(["notify", n.message, options ? id : undefined]);
+      },
+      clear: async () => true,
+      onClicked: on("notificationClicked"),
+    },
     windows: { create: async (w) => void log.push(["window", w.url]) },
     permissions: { remove: async () => {} },
   };
@@ -72,6 +89,7 @@ function installBrowser() {
     if (url.includes("/ocs/")) {
       return new Response(JSON.stringify({ ocs: { meta: { statuscode: 200 }, data: { capabilities } } }), { status: 200 });
     }
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
     return new Response(null, { status: 201 });
   };
 }
@@ -94,7 +112,7 @@ const plainMessage = (text, to = "bob@example.com") => ({
   cc: [],
   bcc: [],
   subject: "Files",
-  identityId: "id1",
+  ...(manifest.permissions.includes("accountsRead") ? { identityId: "id-secondary" } : {}),
   isPlainText: true,
   plainTextBody: text,
 });
@@ -111,6 +129,7 @@ const records = () => Object.entries(store).filter(([key]) => key.startsWith("up
 beforeEach(() => {
   for (const key of Object.keys(store)) delete store[key];
   log.length = 0;
+  identities = new Set(["id-default", "id-secondary"]);
   shareRequests = [];
   rejectShare = () => null;
   capabilities = {};
@@ -128,6 +147,225 @@ beforeEach(() => {
 });
 
 describe("password links across Thunderbird sessions", () => {
+  it("does not recover a sent link for new recipients while its password email is pending", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    const beginNew = browser.compose.beginNew;
+    browser.compose.beginNew = async () => { throw new Error("Compose unavailable"); };
+    await send(3, plainMessage(link, "original@example.com"));
+    assert.equal(records().length, 0, "the pending job replaces the sent upload records");
+    browser.compose.beginNew = beginNew;
+    await send(4, plainMessage(`Forwarded Message\n${link}`, "new@example.com"));
+    assert.equal(passwordEmails().length, 0);
+    const key = Object.keys(store).find((k) => k.startsWith("pendingPasswordEmail:"));
+    await listeners.notificationClicked(key);
+    assert.deepEqual(passwordEmails()[0].to, ["original@example.com"]);
+  });
+
+  it("retains upload records if saving the pending password email fails", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    await listeners.beforeSend({ id: 3 }, plainMessage(link));
+    browser.storage.local.set = async () => { throw new Error("Storage unavailable"); };
+    await assert.rejects(listeners.afterSend({ id: 3 }, {}), /Storage unavailable/);
+    assert.equal(records().length, 1);
+    assert.equal(passwordEmails().length, 0);
+  });
+
+  it("opens the password email from the original non-default identity", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    await send(3, plainMessage(link));
+    assert.equal(passwordEmails()[0].identityId, "id-secondary");
+  });
+
+  it("keeps the original identity when a queued password email is retried after restart", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    browser.compose.beginNew = async () => { throw new Error("Compose unavailable"); };
+    await send(3, plainMessage(link));
+    await startSession();
+    assert.equal(passwordEmails()[0].identityId, "id-secondary");
+  });
+
+  it("falls back to the default only if the queued sending identity has been deleted", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    browser.compose.beginNew = async () => { throw new Error("Compose unavailable"); };
+    await send(3, plainMessage(link));
+    const job = Object.values(store).find((r) => r.details?.plainTextBody);
+    assert.equal(job.details.identityId, "id-secondary");
+    const body = job.details.plainTextBody;
+    identities.delete("id-secondary");
+    await startSession();
+    assert.equal(passwordEmails().length, 1);
+    assert.equal("identityId" in passwordEmails()[0], false);
+    assert.equal(passwordEmails()[0].plainTextBody, body);
+    assert.deepEqual(passwordEmails()[0].to, ["bob@example.com"]);
+    assert.equal(records().length, 0);
+  });
+
+  it("hands over old and new passwords together for self-delivery", async () => {
+    store.accounts.acc1.passwordDelivery = "self";
+    await startSession();
+    const oldLink = (await upload(1, 3)).url;
+    const oldPassword = records()[0][1].password;
+    assert.equal(log.find(([kind]) => kind === "clipboard")[1], oldPassword,
+      "a single password is still copied without a filename prefix");
+    await startSession();
+    const newLink = (await upload(2, 4)).url;
+    const newPassword = records().find(([, r]) => r.url === newLink)[1].password;
+    log.length = 0;
+    await send(4, plainMessage(`${oldLink}\n${newLink}`));
+    const copies = log.filter(([kind]) => kind === "clipboard");
+    assert.equal(copies.length, 1, "one clipboard write must contain all passwords");
+    assert.ok(copies[0][1].includes(`file1.pdf: ${oldPassword}`));
+    assert.ok(copies[0][1].includes(`file2.pdf: ${newPassword}`));
+    assert.equal(passwordEmails().length, 0);
+    assert.equal(records().length, 0);
+  });
+
+  it("names all files in the copied notification when they share one recovered password", async () => {
+    store.accounts.acc1.passwordDelivery = "self";
+    await startSession();
+    const first = (await upload(1, 3)).url;
+    const second = (await upload(2, 3)).url;
+    const password = records()[0][1].password;
+    await startSession();
+    log.length = 0;
+    await send(4, plainMessage(`${first}\n${second}`));
+    assert.deepEqual(log.filter(([kind]) => kind === "clipboard"), [["clipboard", password]]);
+    const notice = log.find(([kind]) => kind === "notify")[1];
+    assert.match(notice, /file1\.pdf, file2\.pdf: the password is on your clipboard/);
+    assert.ok(!notice.includes(password));
+  });
+
+  it("hands over every recovered password with filenames, excluding quoted links", async () => {
+    store.accounts.acc1.passwordDelivery = "self";
+    await startSession();
+    const first = (await upload(1, 3)).url;
+    const shared = (await upload(2, 3)).url;
+    const second = (await upload(3, 4)).url;
+    const quoted = (await upload(4, 5)).url;
+    const passwords = new Map(records().map(([, r]) => [r.url, r.password]));
+    await startSession();
+    log.length = 0;
+    await send(6, plainMessage(`${first}\n${shared}\n${second}\n> ${quoted}`));
+    const copies = log.filter(([kind]) => kind === "clipboard");
+    assert.equal(copies.length, 1);
+    assert.equal(copies[0][1], `file1.pdf, file2.pdf: ${passwords.get(first)}\nfile3.pdf: ${passwords.get(second)}`);
+    assert.equal(records().length, 1, "quoted link stays untouched");
+  });
+
+  it("shows all recovered passwords when the clipboard is unavailable", async () => {
+    store.accounts.acc1.passwordDelivery = "self";
+    await startSession();
+    const first = (await upload(1, 3)).url;
+    const second = (await upload(2, 4)).url;
+    const saved = records().map(([, r]) => r);
+    await startSession();
+    navigator.clipboard.writeText = async () => { throw new Error("Clipboard unavailable"); };
+    log.length = 0;
+    await send(6, plainMessage(`${first}\n${second}`));
+    const notices = log.filter(([kind]) => kind === "notify");
+    assert.equal(notices.length, 1);
+    for (const r of saved) assert.ok(notices[0][1].includes(`${r.name}: ${r.password}`));
+  });
+
+  it("retains the job and logs a redacted error when opening the password email fails", async (t) => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    const password = records()[0][1].password;
+    const warnings = [];
+    t.mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
+    browser.compose.beginNew = async () => {
+      throw new Error(`Compose failed: ${password} bob@example.com`);
+    };
+    await send(3, plainMessage(link));
+    const [key, job] = Object.entries(store).find(([k]) => k.startsWith("pendingPasswordEmail:"));
+    assert.equal(job.details.identityId, "id-secondary");
+    assert.equal(records().length, 0);
+    assert.ok(warnings.some((message) => message.includes("Compose failed")));
+    assert.ok(warnings.every((message) => !message.includes(password) && !message.includes("bob@example.com")));
+    await startSession();
+    assert.equal(store[key], undefined);
+    assert.equal(passwordEmails().length, 1);
+  });
+
+  it("expires pending password emails before retrying, including undated jobs", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    browser.compose.beginNew = async () => { throw new Error("Compose failed"); };
+    await send(3, plainMessage(link));
+    const [key, job] = Object.entries(store).find(([k]) => k.startsWith("pendingPasswordEmail:"));
+    assert.ok(job.createdAt > Date.now() - 10000);
+    job.createdAt = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    store["pendingPasswordEmail:undated"] = { details: job.details, uploadKeys: [] };
+    await startSession();
+    assert.equal(store[key], undefined);
+    assert.equal(store["pendingPasswordEmail:undated"], undefined);
+    assert.equal(records().length, 0);
+    assert.equal(passwordEmails().length, 0);
+  });
+
+  it("removes pending emails for a deleted contributing account and keeps unrelated jobs", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    browser.compose.beginNew = async () => { throw new Error("Compose failed"); };
+    await send(3, plainMessage(link));
+    const [key, job] = Object.entries(store).find(([k]) => k.startsWith("pendingPasswordEmail:"));
+    assert.deepEqual(job.accountIds, ["acc1"]);
+    // A reopened draft can combine links from more than one Filelink account.
+    job.accountIds.push("acc2");
+    store["pendingPasswordEmail:unrelated"] = { ...clone(job), accountIds: ["acc3"], uploadKeys: [] };
+    await listeners.accountDeleted("acc2");
+    assert.equal(store[key], undefined);
+    assert.equal(records().length, 0);
+    assert.ok(store["pendingPasswordEmail:unrelated"]);
+    await listeners.notificationClicked(key);
+    assert.equal(passwordEmails().length, 0);
+  });
+
+  it("keeps passwords after a failed password email and retries from the notification", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    const password = records()[0][1].password;
+    const beginNew = browser.compose.beginNew;
+    let attempts = 0;
+    browser.compose.beginNew = async () => { attempts++; throw new Error("Could not open compose window"); };
+    await send(3, plainMessage(link));
+    assert.equal(attempts, 1, "failed opens wait for an explicit retry or restart");
+    listeners.tabRemoved(3);
+    assert.equal(records().length, 0);
+    const key = Object.keys(store).find((k) => k.startsWith("pendingPasswordEmail:"));
+    assert.ok(key);
+    assert.ok(log.some(([kind, message, id]) => kind === "notify" && id === key && !message.includes(password)));
+    await listeners.notificationClicked(key); // a second failure also retains the password
+    assert.ok(store[key]);
+    browser.compose.beginNew = beginNew;
+    await listeners.notificationClicked(key);
+    assert.ok(passwordEmails()[0].plainTextBody.includes(password));
+    assert.deepEqual(passwordEmails()[0].to, ["bob@example.com"]);
+    assert.equal(records().length, 0);
+    assert.equal(store[key], undefined);
+    await listeners.notificationClicked(key);
+    assert.equal(passwordEmails().length, 1, "a stale notification cannot open another draft");
+  });
+
+  it("retries a failed password email after restart without resending the original", async () => {
+    await startSession();
+    const link = (await upload(1, 3)).url;
+    const password = records()[0][1].password;
+    browser.compose.beginNew = async () => { throw new Error("Could not open compose window"); };
+    await send(3, plainMessage(link, "carol@example.com"));
+    await startSession();
+    assert.equal(passwordEmails().length, 1);
+    assert.ok(passwordEmails()[0].plainTextBody.includes(password));
+    assert.deepEqual(passwordEmails()[0].to, ["carol@example.com"]);
+    assert.equal(records().length, 0);
+    assert.ok(!Object.keys(store).some((k) => k.startsWith("pendingPasswordEmail:")));
+  });
+
   it("keeps a saved draft's password when a later session reuses its fileId and tab ID", async () => {
     // Session 1: a draft with a password link in tab 3, saved and closed.
     await startSession();
@@ -230,6 +468,68 @@ describe("expiry at the server's enforced maximum", () => {
     const result = await upload(1, 3);
     assert.equal(shareRequests.length, 1);
     assert.equal(result.error, "Some other problem");
+  });
+});
+
+describe("failed upload rollback", () => {
+  for (const cancelled of [false, true]) {
+    it(`queues failed cleanup after ${cancelled ? "cancellation" : "an upload error"} and retries after restart`, async () => {
+      await startSession();
+      const originalFetch = fetch;
+      let rollbackUrl;
+      globalThis.fetch = async (url, init = {}) => {
+        if (init.method === "PUT") {
+          if (cancelled) listeners.abort({ id: "acc1" }, 1);
+          throw new Error("Upload offline");
+        }
+        if (init.method === "DELETE") {
+          rollbackUrl = url;
+          throw new Error("Cleanup offline");
+        }
+        return originalFetch(url, init);
+      };
+      const result = await upload(1, 3);
+      if (cancelled) assert.deepEqual(result, { aborted: true });
+      else assert.match(result.error, /Could not reach Nextcloud/);
+      const pending = Object.entries(store).filter(([k]) => k.startsWith("pendingDelete:"));
+      assert.equal(pending.length, 1);
+      const [key, job] = pending[0];
+      assert.equal(job.accountId, "acc1");
+      assert.equal(job.server, store.accounts.acc1.baseUrl);
+      assert.equal(job.userId, "alice");
+      assert.equal("appPassword" in job, false);
+      assert.ok(job.folder);
+      assert.equal(records().length, 0);
+      requests = [];
+      await startSession();
+      assert.ok(requests.some((r) => r.method === "DELETE" && r.url === rollbackUrl));
+      assert.equal(store[key], undefined);
+    });
+  }
+
+  it("does not queue a rollback that succeeds", async () => {
+    await startSession();
+    const originalFetch = fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      if (init.method === "PUT") throw new Error("Upload offline");
+      return originalFetch(url, init);
+    };
+    assert.ok((await upload(1, 3)).error);
+    assert.ok(requests.some((r) => r.method === "DELETE"));
+    assert.ok(!Object.keys(store).some((k) => k.startsWith("pendingDelete:")));
+  });
+
+  it("preserves the upload error if saving the cleanup job also fails", async () => {
+    await startSession();
+    const originalFetch = fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      if (init.method === "PUT" || init.method === "DELETE") throw new Error("Offline");
+      return originalFetch(url, init);
+    };
+    browser.storage.local.set = async () => { throw new Error("Storage unavailable"); };
+    const result = await upload(1, 3);
+    assert.match(result.error, /Could not reach Nextcloud/);
+    assert.doesNotMatch(result.error, /Storage unavailable/);
   });
 });
 

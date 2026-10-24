@@ -47,6 +47,8 @@ const SESSION = randomId();
 const uploadKey = (accountId, fileId) => `upload:${accountId}:${SESSION}:${fileId}`;
 const UPLOAD_PREFIX = "upload:";
 const PENDING_PREFIX = "pendingDelete:";
+const PASSWORD_EMAIL_PREFIX = "pendingPasswordEmail:";
+const openingPasswordEmails = new Set();
 // Records hold the link's password until the message is sent (then they are deleted), so drafts
 // survive a restart. Drop leftovers, e.g. drafts kept for months or never sent.
 const UPLOAD_RECORD_MAX_AGE = 90 * 24 * 60 * 60 * 1000;
@@ -129,13 +131,32 @@ async function persistDelivery(draft) {
  * For when the user sends the password themselves: copy it, and only if that fails show it in a
  * notification (which may linger in the notification centre).
  */
-async function handOverPassword(fileName, password) {
-  const copied = await navigator.clipboard.writeText(password).then(
+async function handOverPasswords(entries) {
+  const groups = new Map();
+  for (const { name, password } of entries) {
+    if (!groups.has(password)) groups.set(password, new Set());
+    groups.get(password).add(name);
+  }
+  // One clipboard write: copying each password in turn would leave only the last one available.
+  // Preserve the bare password for a single group so it can still be pasted straight into Nextcloud.
+  const multiple = groups.size > 1;
+  const fileNames = [...new Set(entries.map(({ name }) => name))].join(", ");
+  const text = multiple
+    ? [...groups].map(([password, names]) => `${[...names].join(", ")}: ${password}`).join("\n")
+    : groups.keys().next().value;
+  const copied = await navigator.clipboard.writeText(text).then(
     () => true,
     () => false,
   );
-  if (copied) notify("Link password copied", `${fileName}: the password is on your clipboard. ${DELIVERY_NOTES.self}`);
-  else notify("Link password", `${fileName}: ${password}\n${DELIVERY_NOTES.self}`);
+  if (copied) {
+    notify(multiple ? "Link passwords copied" : "Link password copied",
+      multiple
+        ? `The passwords for all links are on your clipboard, labeled by file name. ${DELIVERY_NOTES.self}`
+        : `${fileNames}: the password is on your clipboard. ${DELIVERY_NOTES.self}`);
+  } else {
+    notify(multiple ? "Link passwords" : "Link password",
+      `${multiple ? text : `${fileNames}: ${text}`}\n${DELIVERY_NOTES.self}`);
+  }
 }
 
 /**
@@ -144,12 +165,12 @@ async function handOverPassword(fileName, password) {
  * Universal Clipboard would copy it to the user's other devices.
  */
 async function announcePassword(fileName, password, draft, preference) {
-  if (!draft) return handOverPassword(fileName, password); // no compose tab to work with
+  if (!draft) return handOverPasswords([{ name: fileName, password }]); // no compose tab to work with
   if (draft.delivery) return; // already decided for this message
   if (preference !== "ask" && DELIVERY_NOTES[preference]) {
     draft.delivery = preference;
     await persistDelivery(draft);
-    if (preference === "self") return handOverPassword(fileName, password);
+    if (preference === "self") return handOverPasswords([{ name: fileName, password }]);
     notify("Link password", `${fileName}: ${DELIVERY_NOTES[preference]}`);
     return;
   }
@@ -167,7 +188,7 @@ async function announcePassword(fileName, password, draft, preference) {
     console.warn("Could not open the password window:", e.message);
     draft.delivery = "self";
     await persistDelivery(draft);
-    await handOverPassword(fileName, password);
+    await handOverPasswords([{ name: fileName, password }]);
   }
 }
 
@@ -259,7 +280,28 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
     return { url: share.url, templateInfo };
   } catch (error) {
     // Do not leave an unshared or half-configured file behind on the server.
-    if (folder) await removeUpload(settings, { shareId: share?.id, folder }).catch(() => {});
+    if (folder) {
+      const job = {
+        accountId: account.id,
+        server: settings.baseUrl,
+        userId: settings.userId,
+        shareId: share?.id,
+        folder,
+      };
+      try {
+        await removeUpload(settings, job);
+      } catch {
+        // Keep the original connection identity: a reconnect must not delete unrelated files.
+        // A random key also survives restarts and reuse of Thunderbird's file IDs.
+        try {
+          await browser.storage.local.set({ [PENDING_PREFIX + randomId()]: job });
+          console.warn("Upload cleanup failed; saved for retry on next start.");
+        } catch {
+          // Storage failure must not replace the upload error or reject the cloudFile listener.
+          console.warn("Upload cleanup failed and could not be saved for retry.");
+        }
+      }
+    }
     if (controller.signal.aborted) return { aborted: true };
     return { error: error.message };
   } finally {
@@ -307,6 +349,12 @@ browser.cloudFile.onAccountDeleted.addListener(async (accountId) => {
   const stale = Object.keys(all).filter(
     (k) => k.startsWith(`upload:${accountId}:`) || (k.startsWith(PENDING_PREFIX) && all[k].accountId === accountId),
   );
+  for (const [key, job] of Object.entries(all)) {
+    if (key.startsWith(PASSWORD_EMAIL_PREFIX) && job.accountIds?.includes(accountId)) {
+      stale.push(key, ...job.uploadKeys);
+      await browser.notifications.clear(key).catch(() => {});
+    }
+  }
   await browser.storage.local.remove(stale);
   if (account?.baseUrl) await releaseOrigin(account.baseUrl, accounts);
 });
@@ -361,6 +409,7 @@ async function recoverDraft(tabId, details, draft) {
   if (draft?.delivery) {
     // Older links in a message that also has new ones: deliver them the same way.
     for (const [key, link] of links) draft.links.set(key, link);
+    if (draft.delivery === "self") await handOverPasswords([...draft.links.values()]);
     await persistDelivery(draft);
     return draft;
   }
@@ -376,7 +425,7 @@ async function recoverDraft(tabId, details, draft) {
   drafts.set(tabId, recovered);
   if (delivery === "self") {
     // The clipboard from the earlier session is long gone.
-    await handOverPassword(mine[0][1].name, recovered.password);
+    await handOverPasswords([...recovered.links.values()]);
   } else {
     notify("Link password", `This message has password-protected links from an earlier session. ${DELIVERY_NOTES[delivery]}`);
   }
@@ -424,16 +473,99 @@ browser.compose.onAfterSend.addListener(async (tab, sendInfo) => {
   // Sent attachments are never deleted through cloudFile, so their records (and stored passwords)
   // are done with: this window's own, and any recovered from an earlier session.
   const draft = drafts.get(tab.id);
-  drafts.delete(tab.id);
   const recovered = new Set([...(draft?.links.values() ?? [])].map((link) => link.key));
   const all = await browser.storage.local.get(null);
   const ownWindow = (r) => r.session === SESSION && r.tabId === tab.id;
   const sent = Object.keys(all).filter((k) => k.startsWith(UPLOAD_PREFIX) && (ownWindow(all[k]) || recovered.has(k)));
+  if (draft?.delivery === "separate" && draft.recipients && draft.links.size) {
+    // Persist the recipients and passwords before opening a window: the original compose tab may
+    // close, and a failed beginNew must remain recoverable even after Thunderbird restarts.
+    const key = PASSWORD_EMAIL_PREFIX + randomId();
+    await browser.storage.local.set({
+      [key]: {
+        details: passwordMessage(draft.recipients, [...draft.links.values()]),
+        uploadKeys: sent,
+        accountIds: [...new Set([draft.accountId, ...sent.map((k) => all[k].accountId)])],
+        createdAt: Date.now(),
+      },
+    });
+    // The durable job now owns password delivery. Keeping URL-bearing upload records would
+    // let recovery treat a forward of the sent message as another draft needing its password.
+    await browser.storage.local.remove(sent);
+    drafts.delete(tab.id);
+    await openPasswordEmail(key);
+    return;
+  }
+  drafts.delete(tab.id);
   await browser.storage.local.remove(sent);
-  if (draft?.delivery !== "separate" || !draft.recipients || !draft.links.size) return;
-  // Opened as a draft, not sent: the user checks the recipients and sends it themselves.
-  await browser.compose.beginNew(passwordMessage(draft.recipients, [...draft.links.values()]));
 });
+
+/** Log API errors without including password/body tokens, recipients, or URLs echoed by validation. */
+function logPasswordEmailFailure(error, job) {
+  let message = String(error?.message || "Unknown error");
+  const details = job?.details;
+  const sensitive = [
+    ...(details?.plainTextBody?.split(/\s+/).filter((word) => word.length >= 8) || []),
+    ...[details?.to, details?.cc, details?.bcc].flat().filter((value) => typeof value === "string"),
+  ];
+  for (const value of sensitive.sort((a, b) => b.length - a.length)) message = message.replaceAll(value, "[redacted]");
+  message = message.replace(/https?:\/\/\S+|[^\s<>@]+@[^\s<>@]+/g, "[redacted]");
+  console.warn("Could not open the password email:", message);
+}
+
+/** Retain passwords until their separate email opens, or until the retention period expires. */
+async function openPasswordEmail(key) {
+  if (openingPasswordEmails.has(key)) return;
+  openingPasswordEmails.add(key);
+  let job;
+  try {
+    ({ [key]: job } = await browser.storage.local.get(key));
+    if (!job) return;
+    // Also clean leftovers from older jobs or a failed removal immediately after saving a job.
+    await browser.storage.local.remove(job.uploadKeys);
+    if (!(job.createdAt > Date.now() - UPLOAD_RECORD_MAX_AGE)) {
+      await browser.storage.local.remove([...job.uploadKeys, key]);
+      await browser.notifications.clear(key).catch(() => {});
+      return;
+    }
+    // Never send automatically: the user checks the recipients and sends this draft themselves.
+    try {
+      await browser.compose.beginNew(job.details);
+    } catch (e) {
+      // With accountsRead, Thunderbird resolves this identity before opening a window.
+      // Retry only its explicit missing-identity error; other failures may have opened a window.
+      if (!job.details.identityId || e.message !== `Identity not found: ${job.details.identityId}`) throw e;
+      logPasswordEmailFailure(e, job);
+      delete job.details.identityId;
+      await browser.storage.local.set({ [key]: job });
+      await browser.compose.beginNew(job.details);
+      notify("Check the password email's From address",
+        "The original sending identity no longer exists. The password draft uses your default identity. Check From before sending.");
+    }
+    await browser.storage.local.remove([...job.uploadKeys, key]);
+    await browser.notifications.clear(key).catch(() => {});
+  } catch (e) {
+    logPasswordEmailFailure(e, job);
+    await browser.notifications.create(key, {
+      type: "basic",
+      title: "Password email could not be opened",
+      message: "Your original email was sent. The link passwords are saved. Click this notification to retry opening the password email, or restart Thunderbird to retry.",
+    }).catch(() => {});
+  } finally {
+    openingPasswordEmails.delete(key);
+  }
+}
+
+browser.notifications.onClicked.addListener((id) => {
+  if (id.startsWith(PASSWORD_EMAIL_PREFIX)) return openPasswordEmail(id);
+});
+
+async function retryPasswordEmails() {
+  const all = await browser.storage.local.get(null);
+  for (const key of Object.keys(all)) {
+    if (key.startsWith(PASSWORD_EMAIL_PREFIX)) await openPasswordEmail(key);
+  }
+}
 
 async function retryPendingDeletes() {
   const all = await browser.storage.local.get(null);
@@ -492,3 +624,4 @@ restoreConfiguredState();
 retryPendingDeletes();
 pruneUploadRecords();
 refreshServerInfo();
+retryPasswordEmails();
