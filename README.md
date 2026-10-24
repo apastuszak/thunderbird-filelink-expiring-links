@@ -4,6 +4,8 @@ Thunderbird Filelink provider with expiring links, optional generated passwords 
 
 **Works with Nextcloud.** Tested on Nextcloud 35 (AIO, behind a Caddy reverse proxy) with Thunderbird 158.
 
+See the [feature roadmap](ROADMAP.md) for proposed improvements and priorities.
+
 ## Try it
 
 1. Thunderbird 128 or newer: Tools > Developer Tools > Debug Add-ons > Load Temporary Add-on, and pick `manifest.json`.
