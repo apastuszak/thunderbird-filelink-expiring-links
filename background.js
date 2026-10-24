@@ -49,7 +49,7 @@ const uploadKey = (accountId, fileId) => `upload:${accountId}:${SESSION}:${fileI
 const UPLOAD_PREFIX = "upload:";
 const PENDING_PREFIX = "pendingDelete:";
 const PASSWORD_EMAIL_PREFIX = "pendingPasswordEmail:";
-const openingPasswordEmails = new Set();
+const runningPendingJobs = new Set(); // shared by startup, notifications, and the pending-actions page
 // Records hold the link's password until the message is sent (then they are deleted), so drafts
 // survive a restart. Drop leftovers, e.g. drafts kept for months or never sent.
 const UPLOAD_RECORD_MAX_AGE = 90 * 24 * 60 * 60 * 1000;
@@ -208,7 +208,7 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
       throw new Error("One-time download needs the Download Limit app on the Nextcloud server. Turn the option off in this account's settings, or ask the admin to install the app.");
     }
     // One random sub-folder per upload avoids name collisions without renaming the file.
-    folder = `${settings.folder.replace(/^\/+|\/+$/g, "")}/${randomId()}`;
+    folder = [settings.folder.replace(/^\/+|\/+$/g, ""), randomId()].filter(Boolean).join("/");
     const davPath = `${folder}/${fileInfo.name}`;
     await ensureFolder(settings, folder);
     await uploadFile(settings, davPath, fileInfo.data, { signal: controller.signal });
@@ -295,7 +295,7 @@ browser.cloudFile.onFileUpload.addListener(async (account, fileInfo, tab) => {
         // Keep the original connection identity: a reconnect must not delete unrelated files.
         // A random key also survives restarts and reuse of Thunderbird's file IDs.
         try {
-          await browser.storage.local.set({ [PENDING_PREFIX + randomId()]: job });
+          await browser.storage.local.set({ [PENDING_PREFIX + randomId()]: { ...job, createdAt: Date.now() } });
           console.warn("Upload cleanup failed; saved for retry on next start.");
         } catch {
           // Storage failure must not replace the upload error or reject the cloudFile listener.
@@ -332,7 +332,7 @@ browser.cloudFile.onFileDeleted.addListener(async (account, fileId, tab) => {
   } catch (e) {
     // Keep it under a key that a new upload with a reused fileId cannot overwrite; retried at startup.
     console.warn("Cleanup failed, will retry on next start:", e.message);
-    await browser.storage.local.set({ [PENDING_PREFIX + randomId()]: job });
+    await browser.storage.local.set({ [PENDING_PREFIX + randomId()]: { ...job, createdAt: Date.now() } });
     await browser.storage.local.remove(key);
   }
 });
@@ -366,6 +366,13 @@ browser.tabs.onRemoved.addListener((tabId) => drafts.delete(tabId));
 
 // The password window (password/password.js) reads the password and reports the user's choice.
 browser.runtime.onMessage.addListener(async (message) => {
+  if (message?.type?.startsWith("pending:")) {
+    try {
+      return await pendingAction(message);
+    } catch {
+      return { status: "failed", message: "Could not access pending actions. Try again." };
+    }
+  }
   const draft = drafts.get(message?.tabId);
   if (!draft) return null;
   if (message.type === "password:get") {
@@ -512,22 +519,23 @@ function logPasswordEmailFailure(error, job) {
   for (const value of sensitive.sort((a, b) => b.length - a.length)) message = message.replaceAll(value, "[redacted]");
   message = message.replace(/https?:\/\/\S+|[^\s<>@]+@[^\s<>@]+/g, "[redacted]");
   console.warn("Could not open the password email:", message);
+  return message;
 }
 
 /** Retain passwords until their separate email opens, or until the retention period expires. */
-async function openPasswordEmail(key) {
-  if (openingPasswordEmails.has(key)) return;
-  openingPasswordEmails.add(key);
+async function openPasswordEmail(key, { notifyOnFailure = true } = {}) {
+  if (runningPendingJobs.has(key)) return { status: "busy", message: "This action is already running." };
+  runningPendingJobs.add(key);
   let job;
   try {
     ({ [key]: job } = await browser.storage.local.get(key));
-    if (!job) return;
+    if (!job) return { status: "gone", message: "This action has already been resolved." };
     // Also clean leftovers from older jobs or a failed removal immediately after saving a job.
     await browser.storage.local.remove(job.uploadKeys);
     if (!(job.createdAt > Date.now() - UPLOAD_RECORD_MAX_AGE)) {
       await browser.storage.local.remove([...job.uploadKeys, key]);
       await browser.notifications.clear(key).catch(() => {});
-      return;
+      return { status: "expired", message: "The password email expired after 90 days and was removed." };
     }
     // Never send automatically: the user checks the recipients and sends this draft themselves.
     try {
@@ -545,15 +553,18 @@ async function openPasswordEmail(key) {
     }
     await browser.storage.local.remove([...job.uploadKeys, key]);
     await browser.notifications.clear(key).catch(() => {});
+    return { status: "done", message: "Password email opened for you to review and send." };
   } catch (e) {
-    logPasswordEmailFailure(e, job);
-    await browser.notifications.create(key, {
+    const reason = logPasswordEmailFailure(e, job);
+    await recordPendingFailure(key, reason);
+    if (notifyOnFailure) await browser.notifications.create(key, {
       type: "basic",
       title: "Password email could not be opened",
       message: "Your original email was sent. The link passwords are saved. Click this notification to retry opening the password email, or restart Thunderbird to retry.",
     }).catch(() => {});
+    return { status: "failed", message: `Could not open the password email: ${reason}` };
   } finally {
-    openingPasswordEmails.delete(key);
+    runningPendingJobs.delete(key);
   }
 }
 
@@ -570,14 +581,86 @@ async function retryPasswordEmails() {
 
 async function retryPendingDeletes() {
   const all = await browser.storage.local.get(null);
-  for (const [key, job] of Object.entries(all)) {
-    if (!key.startsWith(PENDING_PREFIX)) continue;
-    try {
-      await removeSavedUpload(await getAccount(job.accountId), job); // skipped jobs are dropped too
-      await browser.storage.local.remove(key);
-    } catch {
-      // Offline or disconnected: try again next start.
+  for (const key of Object.keys(all)) {
+    if (key.startsWith(PENDING_PREFIX)) await retryPendingDelete(key);
+  }
+}
+
+async function recordPendingFailure(key, lastError) {
+  try {
+    const { [key]: current } = await browser.storage.local.get(key);
+    // An account may have been deleted while the operation was running. Never recreate its job.
+    if (current) await browser.storage.local.set({ [key]: { ...current, lastError } });
+  } catch {
+    // The original job still allows a retry if saving diagnostics fails.
+  }
+}
+
+async function retryPendingDelete(key) {
+  if (runningPendingJobs.has(key)) return { status: "busy", message: "This action is already running." };
+  runningPendingJobs.add(key);
+  try {
+    const { [key]: job } = await browser.storage.local.get(key);
+    if (!job) return { status: "gone", message: "This action has already been resolved." };
+    const removed = await removeSavedUpload(await getAccount(job.accountId), job);
+    await browser.storage.local.remove(key);
+    return removed
+      ? { status: "done", message: "Server cleanup completed." }
+      : { status: "skipped", message: "The original server or user no longer matches. The job was removed without deleting server content." };
+  } catch (e) {
+    // Cleanup errors need no recipient or password information. Remove URLs from server messages.
+    const reason = String(e.message || "Cleanup failed").replace(/https?:\/\/\S+/g, "[server address]");
+    await recordPendingFailure(key, reason);
+    return { status: "failed", message: reason };
+  } finally {
+    runningPendingJobs.delete(key);
+  }
+}
+
+const pendingForAccount = (key, job, accountId) =>
+  (key.startsWith(PENDING_PREFIX) && job.accountId === accountId) ||
+  (key.startsWith(PASSWORD_EMAIL_PREFIX) && job.accountIds?.includes(accountId));
+
+/** Account-scoped summaries deliberately omit passwords, message bodies, share URLs and credentials. */
+async function pendingAction({ type, accountId, key }) {
+  if (typeof accountId !== "string" || !accountId) throw new Error("Missing account");
+  if (type === "pending:list") {
+    const all = await browser.storage.local.get(null);
+    const jobs = [];
+    for (const [id, job] of Object.entries(all)) {
+      if (!pendingForAccount(id, job, accountId)) continue;
+      const passwordEmail = id.startsWith(PASSWORD_EMAIL_PREFIX);
+      if (passwordEmail && !(job.createdAt > Date.now() - UPLOAD_RECORD_MAX_AGE) && !runningPendingJobs.has(id)) {
+        await openPasswordEmail(id, { notifyOnFailure: false }); // expires it without opening a compose window
+        continue;
+      }
+      jobs.push({
+        key: id,
+        kind: passwordEmail ? "password" : "cleanup",
+        title: passwordEmail ? (job.details?.subject || "Password email") : "Server cleanup",
+        description: passwordEmail ? "Opens a draft for review; never sends automatically." : (job.folder || "Uploaded file"),
+        createdAt: job.createdAt || null,
+        lastError: job.lastError || "",
+        busy: runningPendingJobs.has(id),
+      });
     }
+    return { jobs };
+  }
+  if (typeof key !== "string") throw new Error("Missing job");
+  const { [key]: job } = await browser.storage.local.get(key);
+  if (!job || !pendingForAccount(key, job, accountId)) return { status: "gone", message: "This action is no longer available for this account." };
+  if (type === "pending:retry") return key.startsWith(PASSWORD_EMAIL_PREFIX)
+    ? openPasswordEmail(key, { notifyOnFailure: false })
+    : retryPendingDelete(key);
+  if (type !== "pending:discard") throw new Error("Unknown action");
+  if (runningPendingJobs.has(key)) return { status: "busy", message: "This action is already running. Wait before discarding it." };
+  runningPendingJobs.add(key);
+  try {
+    await browser.storage.local.remove(key.startsWith(PASSWORD_EMAIL_PREFIX) ? [...job.uploadKeys, key] : key);
+    if (key.startsWith(PASSWORD_EMAIL_PREFIX)) await browser.notifications.clear(key).catch(() => {});
+    return { status: "done", message: "Pending action discarded. No server content was changed and no email was sent." };
+  } finally {
+    runningPendingJobs.delete(key);
   }
 }
 

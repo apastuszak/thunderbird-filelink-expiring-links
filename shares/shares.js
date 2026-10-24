@@ -18,6 +18,18 @@ async function loadAccount() {
   return account?.appPassword ? account : null;
 }
 
+/**
+ * The account's current connection, if it is still the server and user the list was loaded from
+ * (its app password may have changed, e.g. after signing in again). Otherwise the share IDs and
+ * paths on the page belong to another connection and must not be acted on, so the list reloads.
+ */
+async function sameConnection(listed) {
+  const current = await loadAccount();
+  if (current && current.baseUrl === listed.baseUrl && current.userId === listed.userId) return current;
+  load("This account was reconnected since the list was loaded, so nothing was changed. The list has been reloaded.");
+  return null;
+}
+
 /** A share expires at the end of its expiry date (in the user's Nextcloud time zone). */
 function expiryText(expiresAt) {
   if (expiresAt == null) return { text: "Never", expired: false };
@@ -31,7 +43,7 @@ function expiryText(expiresAt) {
 function renderRow(account, share) {
   const row = $("row").content.firstElementChild.cloneNode(true);
   row.querySelector(".name").textContent = share.name;
-  row.querySelector(".folder").textContent = share.folder;
+  row.querySelector(".folder").textContent = share.folder || "/";
   row.querySelector(".shared").textContent = share.sharedAt ? dateFormat.format(share.sharedAt) : "";
   const expiry = expiryText(share.expiresAt);
   const expires = row.querySelector(".expires");
@@ -67,7 +79,9 @@ function renderRow(account, share) {
     setBusy(true);
     result.textContent = "Revoking…";
     try {
-      const outcome = await revokeShare(account, share.id);
+      const current = await sameConnection(account);
+      if (!current) return;
+      const outcome = await revokeShare(current, share.id);
       row.classList.add("revoked");
       result.textContent = outcome === "gone" ? "Link already removed on the server." : "Link revoked. The file is still on your server.";
       revoke.remove();
@@ -88,7 +102,9 @@ function renderRow(account, share) {
     setBusy(true);
     result.textContent = "Deleting…";
     try {
-      const outcome = await deleteUploadedFile(account, share.path);
+      const current = await sameConnection(account);
+      if (!current) return;
+      const outcome = await deleteUploadedFile(current, share.path);
       row.classList.add("revoked");
       result.textContent = outcome === "gone" ? "The file was already gone from the server." : "File deleted.";
       for (const b of buttons()) b.remove();
@@ -100,33 +116,38 @@ function renderRow(account, share) {
   return row;
 }
 
-async function load() {
+/** (Re)loads the list. `notice` explains why it was reloaded and stays in front of the status. */
+async function load(notice = "") {
   const button = $("refresh-btn");
   button.disabled = true;
-  setStatus("Loading…");
+  const status = (text, isError) => setStatus(notice ? `${notice} ${text}` : text, isError || !!notice);
+  status("Loading…");
+  // Drop the old rows first: if this load fails, none must stay on screen (their buttons act on the
+  // connection they were loaded with), and the heading must never name another server than the rows.
+  $("shares").hidden = true;
+  $("shares").tBodies[0].replaceChildren();
+  $("who").textContent = "";
   try {
     const account = await loadAccount();
     if (!account) {
-      $("shares").hidden = true;
-      setStatus("This account is not connected. Open its settings and click Connect.", true);
+      status("This account is not connected. Open its settings and click Connect.", true);
       return;
     }
-    $("who").textContent = `${account.displayName || account.userId} @ ${account.baseUrl}`;
     const shares = addOnShares(await listShares(account));
-    const body = $("shares").tBodies[0];
-    body.replaceChildren(...shares.map((share) => renderRow(account, share)));
+    $("who").textContent = `${account.displayName || account.userId} @ ${account.baseUrl}`;
+    $("shares").tBodies[0].replaceChildren(...shares.map((share) => renderRow(account, share)));
     $("shares").hidden = shares.length === 0;
-    setStatus(
+    status(
       shares.length === 0
         ? "No links created by this add-on are currently shared."
         : `${shares.length} ${shares.length === 1 ? "link" : "links"}.`,
     );
   } catch (e) {
-    setStatus(`Could not load the shared files: ${e.message}`, true);
+    status(`Could not load the shared files: ${e.message}`, true);
   } finally {
     button.disabled = false;
   }
 }
 
-$("refresh-btn").addEventListener("click", load);
+$("refresh-btn").addEventListener("click", () => load());
 load();

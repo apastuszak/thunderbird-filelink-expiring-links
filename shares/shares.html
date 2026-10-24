@@ -52,6 +52,19 @@
     </tr>
   </template>
 
+  <section aria-labelledby="pending-heading">
+    <h2 id="pending-heading">Pending actions</h2>
+    <p class="hint">Password emails waiting to open and server cleanups waiting to retry for this account.
+      These actions are saved on this computer and remain available when the server is offline.</p>
+    <div class="toolbar">
+      <button id="pending-refresh" type="button">Refresh pending actions</button>
+      <span id="pending-status" role="status"></span>
+    </div>
+    <p id="pending-result" role="status"></p>
+    <ul id="pending-list" class="pending-list"></ul>
+  </section>
+
   <script type="module" src="shares.js"></script>
+  <script type="module" src="pending.js"></script>
 </body>
 </html>

@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
 let identities;
 import { beforeEach, describe, it } from "node:test";
-import { localDateFromNow } from "../lib/nextcloud.js";
+import { addOnShares, localDateFromNow, SHARE_LABEL } from "../lib/nextcloud.js";
 
 const store = {};
 const log = [];
@@ -571,5 +571,138 @@ describe("cleanup after switching server or user", () => {
     await startSession();
     assert.deepEqual(deletes(), []);
     assert.equal(Object.keys(store).filter((k) => k.startsWith("pendingDelete:")).length, 0);
+  });
+});
+
+describe("upload folder", () => {
+  it("shares an upload to the root folder at a path the shared-files page manages", async () => {
+    store.accounts.acc1.folder = "/";
+    await startSession();
+    await upload(1, 1);
+    const [{ path }] = shareRequests;
+    assert.match(path, /^\/[0-9a-f]{16}\/file1\.pdf$/);
+    const listed = { share_type: 3, label: SHARE_LABEL, item_type: "file", path, stime: 1 };
+    assert.equal(addOnShares([listed]).length, 1);
+  });
+});
+
+describe("pending actions", () => {
+  const request = (type, key, accountId = "acc1") => listeners.message({ type: `pending:${type}`, accountId, key });
+  const cleanup = () => ({ accountId: "acc1", server: store.accounts.acc1.baseUrl, userId: "alice", folder: "Uploads/0123456789abcdef", createdAt: Date.now() });
+  const mail = () => ({ accountIds: ["acc1"], createdAt: Date.now(), uploadKeys: [], details: { to: ["recipient@example.com"], subject: "Password for: report", plainTextBody: "SecretPassword123!", isPlainText: true } });
+
+  it("lists only this account's jobs without credentials, message bodies, or passwords", async () => {
+    await startSession();
+    store["pendingDelete:cleanup"] = cleanup();
+    store["pendingPasswordEmail:mail"] = mail();
+    store["pendingDelete:other"] = { ...cleanup(), accountId: "acc2" };
+    const { jobs } = await request("list");
+    assert.deepEqual(jobs.map((j) => j.kind), ["cleanup", "password"]);
+    const output = JSON.stringify(jobs);
+    assert.ok(!output.includes("SecretPassword123!"));
+    assert.ok(!output.includes("recipient@example.com"));
+    assert.ok(!output.includes("app-password"));
+    assert.equal((await request("discard", "pendingDelete:other")).status, "gone");
+    assert.ok(store["pendingDelete:other"]);
+    assert.equal((await request("discard", "accounts")).status, "gone");
+    assert.ok(store.accounts);
+  });
+
+  it("retries cleanup and leaves no pending job after success", async () => {
+    await startSession();
+    store["pendingDelete:cleanup"] = cleanup();
+    assert.equal((await request("retry", "pendingDelete:cleanup")).status, "done");
+    assert.ok(requests.some((r) => r.method === "DELETE"));
+    assert.equal(store["pendingDelete:cleanup"], undefined);
+  });
+
+  it("keeps disconnected cleanups and never deletes on a different connection", async () => {
+    await startSession();
+    store["pendingDelete:cleanup"] = cleanup();
+    store.accounts.acc1.appPassword = null;
+    assert.equal((await request("retry", "pendingDelete:cleanup")).status, "failed");
+    assert.ok(store["pendingDelete:cleanup"]);
+    assert.match((await request("list")).jobs[0].lastError, /not connected/);
+    Object.assign(store.accounts.acc1, { appPassword: "new", userId: "bob" });
+    assert.equal((await request("retry", "pendingDelete:cleanup")).status, "skipped");
+    assert.equal(requests.filter((r) => r.method === "DELETE").length, 0);
+  });
+
+  it("discards jobs without contacting the server or opening an email", async () => {
+    await startSession();
+    store["pendingDelete:cleanup"] = cleanup();
+    store["pendingPasswordEmail:mail"] = mail();
+    assert.equal((await request("discard", "pendingDelete:cleanup")).status, "done");
+    assert.equal((await request("discard", "pendingPasswordEmail:mail")).status, "done");
+    assert.deepEqual((await request("list")).jobs, []);
+    assert.equal(passwordEmails().length, 0);
+    assert.equal(requests.filter((r) => r.method === "DELETE").length, 0);
+  });
+
+  it("opens a pending password draft while disconnected, preserving its recipients", async () => {
+    await startSession();
+    store["pendingPasswordEmail:mail"] = mail();
+    store.accounts.acc1.appPassword = null;
+    assert.equal((await request("retry", "pendingPasswordEmail:mail")).status, "done");
+    assert.deepEqual(passwordEmails()[0].to, ["recipient@example.com"]);
+    assert.equal(store["pendingPasswordEmail:mail"], undefined);
+  });
+
+  it("does not duplicate or discard a password job being opened from a notification", async () => {
+    await startSession();
+    store["pendingPasswordEmail:mail"] = mail();
+    let finish;
+    let attempts = 0;
+    browser.compose.beginNew = async () => { attempts++; await new Promise((resolve) => { finish = resolve; }); };
+    const running = listeners.notificationClicked("pendingPasswordEmail:mail");
+    await tick();
+    assert.equal((await request("list")).jobs[0].busy, true);
+    assert.equal((await request("retry", "pendingPasswordEmail:mail")).status, "busy");
+    assert.equal((await request("discard", "pendingPasswordEmail:mail")).status, "busy");
+    assert.equal(attempts, 1);
+    finish();
+    await running;
+    assert.deepEqual((await request("list")).jobs, []);
+  });
+
+  it("serializes concurrent cleanup retries and discards", async () => {
+    await startSession();
+    store["pendingDelete:cleanup"] = cleanup();
+    let finish;
+    let attempts = 0;
+    globalThis.fetch = async () => { attempts++; await new Promise((resolve) => { finish = resolve; }); return new Response(null, { status: 204 }); };
+    const running = request("retry", "pendingDelete:cleanup");
+    await tick();
+    assert.equal((await request("retry", "pendingDelete:cleanup")).status, "busy");
+    assert.equal((await request("discard", "pendingDelete:cleanup")).status, "busy");
+    assert.equal(attempts, 1);
+    finish();
+    assert.equal((await running).status, "done");
+  });
+
+  it("expires old password jobs on listing without opening a draft", async () => {
+    await startSession();
+    store["pendingPasswordEmail:mail"] = { ...mail(), createdAt: Date.now() - 91 * 86400000 };
+    assert.deepEqual((await request("list")).jobs, []);
+    assert.equal(store["pendingPasswordEmail:mail"], undefined);
+    assert.equal(passwordEmails().length, 0);
+  });
+
+  it("shows a redacted failure reason and retains the job for another retry", async (t) => {
+    await startSession();
+    store["pendingPasswordEmail:mail"] = mail();
+    t.mock.method(console, "warn", () => {});
+    browser.compose.beginNew = async () => { throw new Error("Compose failed: SecretPassword123! recipient@example.com"); };
+    const result = await request("retry", "pendingPasswordEmail:mail");
+    assert.equal(result.status, "failed");
+    const { jobs } = await request("list");
+    assert.match(jobs[0].lastError, /Compose failed/);
+    assert.equal(log.filter(([kind]) => kind === "notify").length, 0, "page failures are reported inline only");
+    for (const value of [JSON.stringify(result), JSON.stringify(jobs)]) {
+      assert.ok(!value.includes("SecretPassword123!"));
+      assert.ok(!value.includes("recipient@example.com"));
+    }
+    await listeners.notificationClicked("pendingPasswordEmail:mail");
+    assert.equal(log.filter(([kind]) => kind === "notify").length, 1, "notification retries still notify on failure");
   });
 });

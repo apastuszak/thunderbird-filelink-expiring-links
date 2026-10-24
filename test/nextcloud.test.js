@@ -558,6 +558,13 @@ describe("shared-files page", () => {
     assert.equal(addOnShares([share({ expiration: null })])[0].expiresAt, null);
   });
 
+  it("includes uploads made with the root as the upload folder", () => {
+    const [root] = addOnShares([share({ path: "/0123456789abcdef/report.pdf" })]);
+    assert.equal(root.path, "/0123456789abcdef/report.pdf");
+    assert.equal(root.folder, "");
+    assert.deepEqual(addOnShares([share({ path: "/report.pdf" }), share({ path: "/0123456789abcdef" })]), []);
+  });
+
   it("revokes a link with DELETE on the share", async () => {
     const calls = mockFetch(200, { ocs: { meta: { statuscode: 200 }, data: [] } });
     assert.equal(await revokeShare(account, "7"), "revoked");
@@ -578,32 +585,27 @@ describe("shared-files page", () => {
 describe("deleting an uploaded file", () => {
   const path = "/Thunderbird attachments/0123456789abcdef/report #1.pdf";
   const base = "https://cloud.example.com/remote.php/dav/files/alice";
-  const multistatus = (n) =>
-    `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">${"<d:response><d:href>x</d:href></d:response>".repeat(n)}</d:multistatus>`;
 
-  it("deletes the file, then its per-upload folder once empty", async () => {
-    const calls = routeFetch((method) => (method === "PROPFIND" ? [207, multistatus(1)] : [204]));
+  // A folder DELETE is recursive, so even an "is it empty?" check first could remove a file added
+  // in between: only the file itself is ever deleted.
+  it("deletes only the file, never its per-upload folder", async () => {
+    const calls = routeFetch(() => [204]);
     assert.equal(await deleteUploadedFile(account, path), "deleted");
     assert.deepEqual(
       calls.map((c) => [c.method, c.url]),
-      [
-        ["DELETE", `${base}/Thunderbird%20attachments/0123456789abcdef/report%20%231.pdf`],
-        ["PROPFIND", `${base}/Thunderbird%20attachments/0123456789abcdef`],
-        ["DELETE", `${base}/Thunderbird%20attachments/0123456789abcdef`],
-      ],
+      [["DELETE", `${base}/Thunderbird%20attachments/0123456789abcdef/report%20%231.pdf`]],
     );
-    assert.equal(calls[1].init.headers.Depth, "1");
-    for (const c of calls) assert.equal(c.init.redirect, "error");
+    assert.equal(calls[0].init.redirect, "error");
   });
 
-  it("keeps the folder if something else is in it", async () => {
-    const calls = routeFetch((method) => (method === "PROPFIND" ? [207, multistatus(2)] : [204]));
-    assert.equal(await deleteUploadedFile(account, path), "deleted");
-    assert.deepEqual(calls.map((c) => c.method), ["DELETE", "PROPFIND"]);
+  it("deletes an upload made with the root as the upload folder", async () => {
+    const calls = routeFetch(() => [204]);
+    assert.equal(await deleteUploadedFile(account, "/0123456789abcdef/report.pdf"), "deleted");
+    assert.deepEqual(calls.map((c) => [c.method, c.url]), [["DELETE", `${base}/0123456789abcdef/report.pdf`]]);
   });
 
   it("reports a file that no longer exists as gone", async () => {
-    routeFetch((method) => (method === "PROPFIND" ? [404] : [404]));
+    routeFetch(() => [404]);
     assert.equal(await deleteUploadedFile(account, path), "gone");
   });
 
@@ -613,14 +615,9 @@ describe("deleting an uploaded file", () => {
     assert.equal(calls.length, 1);
   });
 
-  it("still reports the file as deleted if tidying the folder fails", async () => {
-    routeFetch((method) => (method === "PROPFIND" ? [500] : [204]));
-    assert.equal(await deleteUploadedFile(account, path), "deleted");
-  });
-
   it("refuses anything outside a per-upload folder", async () => {
     const calls = routeFetch(() => [204]);
-    for (const bad of ["/Documents/taxes.pdf", "/Thunderbird attachments/report.pdf", "/Thunderbird attachments/0123456789abcdef", undefined]) {
+    for (const bad of ["/Documents/taxes.pdf", "/Thunderbird attachments/report.pdf", "/Thunderbird attachments/0123456789abcdef", "/0123456789abcdef", undefined]) {
       await assert.rejects(deleteUploadedFile(account, bad), /not uploaded by this add-on/);
     }
     assert.equal(calls.length, 0);

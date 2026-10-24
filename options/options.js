@@ -86,7 +86,7 @@ async function render() {
   renderChoices(a);
   const connected = !!a.appPassword;
   $("connected").hidden = !connected;
-  $("shares-row").hidden = !connected;
+  $("shares-row").hidden = !accountId; // pending actions remain accessible while disconnected
   $("who").textContent = connected ? `${a.displayName || a.userId} @ ${a.baseUrl}` : "";
   $("connect-btn").hidden = connected;
   $("url").disabled = connected;

@@ -18,3 +18,9 @@ tr.revoked td:not(.actions) { opacity: .55; text-decoration: line-through; }
 button { padding: 5px 12px; cursor: pointer; }
 button.danger { color: #c0392b; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+section { margin-top: 2em; }
+h2 { font-size: 1.15em; }
+.pending-list { list-style: none; padding: 0; }
+.pending-list li { padding: 12px 0; border-bottom: 1px solid GrayText; overflow-wrap: anywhere; }
+.pending-list p { margin: .4em 0; }
+.pending-list button + button { margin-left: 8px; }

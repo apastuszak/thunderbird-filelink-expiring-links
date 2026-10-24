@@ -15,9 +15,11 @@ See the [feature roadmap](ROADMAP.md) for proposed improvements and priorities.
 
 ## Shared files and revoking links
 
-Sent the wrong file, or to the wrong people? Open the provider's settings (Settings > Composition > Attachments, select "Expiring Links") and click **Shared files…**. The page lists the links this add-on has created on your server, newest first, with their expiry date and whether they have a password. **Revoke link** stops anyone from downloading the file through that link and keeps the file on your server. **Delete file** removes the file and its link; with Nextcloud's trash bin (on by default) the file goes to Deleted files, where it can still be restored for a while. Its upload folder is removed too, but only if nothing else is in it. Copies already downloaded cannot be recalled either way.
+Sent the wrong file, or to the wrong people? Open the provider's settings (Settings > Composition > Attachments, select "Expiring Links") and click **Shared files…**. The page lists the links this add-on has created on your server, newest first, with their expiry date and whether they have a password. **Revoke link** stops anyone from downloading the file through that link and keeps the file on your server. **Delete file** removes the file and its link; with Nextcloud's trash bin (on by default) the file goes to Deleted files, where it can still be restored for a while. Its upload folder (named with random letters and digits) is left behind, empty unless something else was put in it. Copies already downloaded cannot be recalled either way.
 
 The list comes straight from your server, so it also reflects links you changed or removed in Nextcloud. Links you shared by hand in Nextcloud are not shown.
+
+The **Pending actions** section on the same page shows locally saved password emails and server cleanups for this account, even while offline or disconnected. **Open password email** opens a draft for you to review and send; **Retry now** retries a cleanup using the original-server/user checks. **Discard** stops retrying: discarding a password email may lose the only remaining copy of its passwords, and discarding cleanup leaves server content in place. Each discard asks for confirmation. Failed retries show an error and remain available for another attempt. Jobs update as they are resolved; use **Refresh pending actions** to check again. No email is sent automatically.
 
 ## Security notes
 
